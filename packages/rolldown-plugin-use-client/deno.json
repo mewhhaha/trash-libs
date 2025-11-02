@@ -1,0 +1,26 @@
+{
+    "name": "@mewhhaha/rolldown-plugin-use-client",
+    "version": "0.0.1",
+    "exports": {
+        ".": "./src/index.ts",
+        "./eslint-plugin": "./src/eslint/use-client-plugin.ts"
+    },
+    "license": "MIT",
+    "imports": {
+        "@rolldown/pluginutils": "npm:@rolldown/pluginutils@^1.0.0-beta.45",
+        "eslint": "npm:eslint@^9.0.0",
+        "estree": "npm:@types/estree@^1.0.8",
+        "rolldown": "npm:rolldown@^1.0.0-beta.45",
+        "typescript": "npm:typescript@^5.9.3"
+    },
+    "tasks": {
+        "lint": "deno lint",
+        "test": "deno test"
+    },
+    "compilerOptions": {
+        "types": ["npm:@types/node@^24.9.2"]
+    },
+    "publish": {
+        "exclude": ["./dist", "./node_modules", "./tsconfig.json"]
+    }
+}

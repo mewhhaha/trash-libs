@@ -1,0 +1,6 @@
+{
+    "workspace": [
+        "./packages/rolldown-plugin-tailwindcss",
+        "./packages/rolldown-plugin-use-client"
+    ]
+}
