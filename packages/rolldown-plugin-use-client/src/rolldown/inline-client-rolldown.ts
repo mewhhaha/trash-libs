@@ -509,6 +509,12 @@ function collectIdentifierPositions(sourceFile: ts.SourceFile) {
   return positions;
 }
 
+function parseInlineModulePath(inlineId: string) {
+  const withoutPrefix = inlineId.slice(INLINE_ID_PREFIX.length);
+  const [pathname] = withoutPrefix.split("?", 1);
+  return pathname;
+}
+
 export type InlineClientPluginOptions = {
   /**
    * Extra filter expression(s) to append to the default transform filter.
@@ -698,7 +704,11 @@ export default function inlineClientHandlers(
                 .replace(/[^a-zA-Z0-9_-]+/g, "_");
 
               const fileName = `${baseName}.${hash}.client.ts`;
-              const moduleId = `${INLINE_ID_PREFIX}${fileName}`;
+              const inlineModulePath = path.join(
+                path.dirname(absoluteId),
+                fileName,
+              );
+              const moduleId = `${INLINE_ID_PREFIX}${inlineModulePath}`;
 
               const moduleCode = `"use client";\n\n${importCode}${declarationCode}export default ${handlerText};\n`;
 
@@ -858,7 +868,17 @@ export default function inlineClientHandlers(
       },
     },
 
-    resolveId(id) {
+    resolveId(id, importer) {
+      if (
+        typeof id === "string" &&
+        typeof importer === "string" &&
+        importer.startsWith(INLINE_ID_PREFIX) &&
+        id.startsWith(".")
+      ) {
+        const importerPath = parseInlineModulePath(importer);
+        return path.resolve(path.dirname(importerPath), id);
+      }
+
       if (typeof id === "string" && id.startsWith(INLINE_ID_PREFIX)) {
         return id;
       }
