@@ -8,17 +8,9 @@ import {
   INLINE_ID_PREFIX,
   clearInlineClientModules,
   getInlineClientModule,
+  parseInlineModulePath,
   setInlineClientModule,
 } from "./inline-client-registry.ts";
-
-const SCRIPT_KIND_BY_EXT: Record<string, ts.ScriptKind> = {
-  ".js": ts.ScriptKind.JS,
-  ".jsx": ts.ScriptKind.JSX,
-  ".ts": ts.ScriptKind.TS,
-  ".tsx": ts.ScriptKind.TSX,
-  ".mjs": ts.ScriptKind.JS,
-  ".cjs": ts.ScriptKind.JS,
-};
 
 type Replacement = {
   start: number;
@@ -509,10 +501,162 @@ function collectIdentifierPositions(sourceFile: ts.SourceFile) {
   return positions;
 }
 
-function parseInlineModulePath(inlineId: string) {
-  const withoutPrefix = inlineId.slice(INLINE_ID_PREFIX.length);
-  const [pathname] = withoutPrefix.split("?", 1);
-  return pathname;
+function buildTransformFilter(
+  defaults: TopLevelFilterExpression[],
+  userFilter: TopLevelFilterExpression | TopLevelFilterExpression[] | undefined,
+) {
+  if (userFilter === undefined) {
+    return defaults;
+  }
+  return [
+    ...defaults,
+    ...(Array.isArray(userFilter) ? userFilter : [userFilter]),
+  ];
+}
+
+function pruneUnusedImports(
+  sourceFile: ts.SourceFile,
+  importReferences: Map<ts.ImportDeclaration, Set<string>>,
+  inlineFunctionRanges: Range[],
+) {
+  const replacements: Replacement[] = [];
+  const identifierPositions = collectIdentifierPositions(sourceFile);
+
+  for (const [importNode, names] of importReferences) {
+    const removableNames = new Set<string>();
+    const importStart = importNode.getStart(sourceFile);
+    const importEnd = importNode.end;
+
+    for (const name of names) {
+      const positions = identifierPositions.get(name) ?? [];
+      const hasExternalUse = positions.some((position) => {
+        if (position >= importStart && position < importEnd) {
+          return false;
+        }
+        if (isPositionInRanges(position, inlineFunctionRanges)) {
+          return false;
+        }
+        return true;
+      });
+      if (!hasExternalUse) {
+        removableNames.add(name);
+      }
+    }
+
+    if (removableNames.size === 0) {
+      continue;
+    }
+
+    const importClause = importNode.importClause;
+    if (!importClause) {
+      continue;
+    }
+
+    const defaultBinding =
+      importClause.name && removableNames.has(importClause.name.text)
+        ? undefined
+        : (importClause.name ?? undefined);
+
+    let namedBindings = importClause.namedBindings ?? undefined;
+    let modified = false;
+
+    if (namedBindings) {
+      if (ts.isNamespaceImport(namedBindings)) {
+        if (removableNames.has(namedBindings.name.text)) {
+          namedBindings = undefined;
+          modified = true;
+        }
+      } else {
+        const keptElements = namedBindings.elements.filter(
+          (specifier) => !removableNames.has(specifier.name.text),
+        );
+        if (keptElements.length !== namedBindings.elements.length) {
+          modified = true;
+          if (keptElements.length === 0) {
+            namedBindings = undefined;
+          } else {
+            namedBindings = ts.factory.updateNamedImports(
+              namedBindings,
+              ts.factory.createNodeArray(keptElements),
+            );
+          }
+        }
+      }
+    }
+
+    if (importClause.name && !defaultBinding) {
+      modified = true;
+    }
+
+    if (!modified) {
+      continue;
+    }
+
+    if (!defaultBinding && !namedBindings) {
+      replacements.push({
+        start: importNode.getStart(sourceFile),
+        end: importNode.end,
+        replacement: "",
+      });
+      continue;
+    }
+
+    const updatedClause = ts.factory.updateImportClause(
+      importClause,
+      importClause.isTypeOnly,
+      defaultBinding,
+      namedBindings,
+    );
+
+    const updatedImport = ts.factory.updateImportDeclaration(
+      importNode,
+      importNode.modifiers,
+      updatedClause,
+      importNode.moduleSpecifier,
+      importNode.assertClause,
+    );
+
+    const updatedCode = printer.printNode(
+      ts.EmitHint.Unspecified,
+      updatedImport,
+      sourceFile,
+    );
+
+    replacements.push({
+      start: importNode.getStart(sourceFile),
+      end: importNode.end,
+      replacement: updatedCode,
+    });
+  }
+
+  return replacements;
+}
+
+function detectScriptKind(filePath: string) {
+  const getKind = (ts as typeof ts & {
+    getScriptKindFromFileName?: (fileName: string) => ts.ScriptKind;
+  }).getScriptKindFromFileName;
+  if (getKind) {
+    return getKind(filePath);
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case ".ts":
+    case ".mts":
+    case ".cts":
+      return ts.ScriptKind.TS;
+    case ".tsx":
+      return ts.ScriptKind.TSX;
+    case ".js":
+    case ".mjs":
+    case ".cjs":
+      return ts.ScriptKind.JS;
+    case ".jsx":
+      return ts.ScriptKind.JSX;
+    default:
+      return ts.ScriptKind.Unknown;
+  }
 }
 
 export type InlineClientPluginOptions = {
@@ -530,14 +674,7 @@ export default function inlineClientHandlers(
     include(id(/\.[cm]?[jt]sx?$/i, { cleanUrl: true })),
     exclude(id(/(?:^|[\\/])node_modules(?:[\\/]|$)/)),
   ];
-  const userFilter = options.filter;
-  const transformFilter: TopLevelFilterExpression[] =
-    userFilter === undefined
-      ? defaultFilter
-      : [
-          ...defaultFilter,
-          ...(Array.isArray(userFilter) ? userFilter : [userFilter]),
-        ];
+  const transformFilter = buildTransformFilter(defaultFilter, options.filter);
 
   return {
     name: "inline-client-handlers",
@@ -554,9 +691,8 @@ export default function inlineClientHandlers(
 
         this.addWatchFile?.(absoluteId);
 
-        const ext = path.extname(absoluteId);
-        const scriptKind = SCRIPT_KIND_BY_EXT[ext];
-        if (!scriptKind) return;
+        const scriptKind = detectScriptKind(absoluteId);
+        if (scriptKind === ts.ScriptKind.Unknown) return;
 
         const sourceFile = ts.createSourceFile(
           absoluteId,
@@ -739,114 +875,13 @@ export default function inlineClientHandlers(
         visit(sourceFile);
 
         if (inlineFunctionRanges.length > 0 && importReferences.size > 0) {
-          const identifierPositions = collectIdentifierPositions(sourceFile);
-
-          for (const [importNode, names] of importReferences) {
-            const removableNames = new Set<string>();
-            const importStart = importNode.getStart(sourceFile);
-            const importEnd = importNode.end;
-
-            for (const name of names) {
-              const positions = identifierPositions.get(name) ?? [];
-              const hasExternalUse = positions.some((position) => {
-                if (position >= importStart && position < importEnd) {
-                  return false;
-                }
-                if (isPositionInRanges(position, inlineFunctionRanges)) {
-                  return false;
-                }
-                return true;
-              });
-              if (!hasExternalUse) {
-                removableNames.add(name);
-              }
-            }
-
-            if (removableNames.size === 0) {
-              continue;
-            }
-
-            const importClause = importNode.importClause;
-            if (!importClause) {
-              continue;
-            }
-
-            const defaultBinding =
-              importClause.name && removableNames.has(importClause.name.text)
-                ? undefined
-                : (importClause.name ?? undefined);
-
-            let namedBindings = importClause.namedBindings ?? undefined;
-            let modified = false;
-
-            if (namedBindings) {
-              if (ts.isNamespaceImport(namedBindings)) {
-                if (removableNames.has(namedBindings.name.text)) {
-                  namedBindings = undefined;
-                  modified = true;
-                }
-              } else {
-                const keptElements = namedBindings.elements.filter(
-                  (specifier) => !removableNames.has(specifier.name.text),
-                );
-                if (keptElements.length !== namedBindings.elements.length) {
-                  modified = true;
-                  if (keptElements.length === 0) {
-                    namedBindings = undefined;
-                  } else {
-                    namedBindings = ts.factory.updateNamedImports(
-                      namedBindings,
-                      ts.factory.createNodeArray(keptElements),
-                    );
-                  }
-                }
-              }
-            }
-
-            if (importClause.name && !defaultBinding) {
-              modified = true;
-            }
-
-            if (!modified) {
-              continue;
-            }
-
-            if (!defaultBinding && !namedBindings) {
-              replacements.push({
-                start: importNode.getStart(sourceFile),
-                end: importNode.end,
-                replacement: "",
-              });
-              continue;
-            }
-
-            const updatedClause = ts.factory.updateImportClause(
-              importClause,
-              importClause.isTypeOnly,
-              defaultBinding,
-              namedBindings,
-            );
-
-            const updatedImport = ts.factory.updateImportDeclaration(
-              importNode,
-              importNode.modifiers,
-              updatedClause,
-              importNode.moduleSpecifier,
-              importNode.assertClause,
-            );
-
-            const updatedCode = printer.printNode(
-              ts.EmitHint.Unspecified,
-              updatedImport,
+          replacements.push(
+            ...pruneUnusedImports(
               sourceFile,
-            );
-
-            replacements.push({
-              start: importNode.getStart(sourceFile),
-              end: importNode.end,
-              replacement: updatedCode,
-            });
-          }
+              importReferences,
+              inlineFunctionRanges,
+            ),
+          );
         }
 
         if (replacements.length === 0) {
@@ -868,7 +903,7 @@ export default function inlineClientHandlers(
       },
     },
 
-    resolveId(id, importer) {
+    async resolveId(id, importer) {
       if (
         typeof id === "string" &&
         typeof importer === "string" &&
@@ -876,6 +911,12 @@ export default function inlineClientHandlers(
         id.startsWith(".")
       ) {
         const importerPath = parseInlineModulePath(importer);
+        const resolved = await this.resolve?.(id, importerPath, {
+          skipSelf: true,
+        });
+        if (resolved !== null && resolved !== undefined) {
+          return resolved;
+        }
         return path.resolve(path.dirname(importerPath), id);
       }
 
