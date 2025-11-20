@@ -904,20 +904,23 @@ export default function inlineClientHandlers(
     },
 
     async resolveId(id, importer) {
-      if (
-        typeof id === "string" &&
-        typeof importer === "string" &&
-        importer.startsWith(INLINE_ID_PREFIX) &&
-        id.startsWith(".")
-      ) {
-        const importerPath = parseInlineModulePath(importer);
-        const resolved = await this.resolve?.(id, importerPath, {
-          skipSelf: true,
-        });
-        if (resolved !== null && resolved !== undefined) {
-          return resolved;
+      if (typeof id === "string" && typeof importer === "string") {
+        if (importer.startsWith(INLINE_ID_PREFIX)) {
+          const importerPath = parseInlineModulePath(importer);
+          const resolved = await this.resolve?.(id, importerPath, {
+            skipSelf: true,
+          });
+          if (resolved !== null && resolved !== undefined) {
+            return resolved;
+          }
+          if (id.startsWith(".")) {
+            return path.resolve(path.dirname(importerPath), id);
+          }
         }
-        return path.resolve(path.dirname(importerPath), id);
+
+        if (id.startsWith(INLINE_ID_PREFIX)) {
+          return id;
+        }
       }
 
       if (typeof id === "string" && id.startsWith(INLINE_ID_PREFIX)) {
