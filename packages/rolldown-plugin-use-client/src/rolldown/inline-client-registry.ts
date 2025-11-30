@@ -23,3 +23,7 @@ export function parseInlineModulePath(inlineId: string): string {
   const [pathname] = withoutPrefix.split("?", 1);
   return pathname;
 }
+
+export function listInlineClientModules(): Array<{ id: string; code: string }> {
+  return Array.from(modules.entries()).map(([id, code]) => ({ id, code }));
+}
