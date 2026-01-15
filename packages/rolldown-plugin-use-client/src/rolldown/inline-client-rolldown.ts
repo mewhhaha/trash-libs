@@ -740,6 +740,10 @@ export type InlineClientPluginOptions = {
    * Enable debug logging or supply a custom logger.
    */
   debug?: boolean | ((message: string) => void);
+  /**
+   * How to handle references that cannot be bundled into the client chunk.
+   */
+  unresolved?: "error" | "warn" | "ignore";
 };
 
 export default function inlineClientHandlers(
@@ -776,6 +780,7 @@ export default function inlineClientHandlers(
           : options.debug
           ? (msg: string) => this.warn?.(`[use-client] ${msg}`)
           : null;
+        const unresolvedPolicy = options.unresolved ?? "warn";
 
         const absoluteId = path.isAbsolute(id) ? id : path.resolve(id);
         this.addWatchFile?.(absoluteId);
@@ -903,11 +908,15 @@ export default function inlineClientHandlers(
             (name) => !importMap.has(name) && !declarationMap.has(name),
           );
           if (unresolved.length > 0) {
-            fail(
+            const message =
               `[use-client] inline handler in ${absoluteId} references values that are not available in the client bundle: ${
                 unresolved.join(", ")
-              }`,
-            );
+              }`;
+            if (unresolvedPolicy === "error") {
+              fail(message);
+            } else if (unresolvedPolicy === "warn") {
+              this.warn?.(message);
+            }
           }
 
           while (pending.length > 0) {

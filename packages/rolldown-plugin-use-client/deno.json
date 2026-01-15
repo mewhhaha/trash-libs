@@ -1,6 +1,6 @@
 {
   "name": "@mewhhaha/rolldown-plugin-use-client",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "exports": {
     ".": "./src/index.ts",
     "./eslint-plugin": "./src/eslint/use-client-plugin.ts"

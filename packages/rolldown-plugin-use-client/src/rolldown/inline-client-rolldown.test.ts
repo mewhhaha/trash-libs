@@ -289,7 +289,7 @@ const handler = () => {
 });
 
 Deno.test("inline handler rejects unresolved references", async () => {
-  const plugin = useClient();
+  const plugin = useClient({ unresolved: "error" });
   const handler = getTransformHandler(plugin);
 
   const ctx: TransformContextLike = {
