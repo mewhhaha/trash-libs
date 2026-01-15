@@ -659,7 +659,18 @@ function stripUseClientDirective(fnNode: SwcNode) {
 
 function findInlineFunctions(ast: SwcProgram) {
   const matches: Array<{ node: SwcNode }> = [];
-  const stack: SwcNode[] = [ast];
+  const stack: SwcNode[] = [];
+  const seen = new WeakSet<object>();
+
+  const pushNode = (value: unknown) => {
+    if (!isSwcNode(value)) return;
+    const obj = value as object;
+    if (seen.has(obj)) return;
+    seen.add(obj);
+    stack.push(value);
+  };
+
+  pushNode(ast);
 
   while (stack.length) {
     const node = stack.pop();
@@ -698,25 +709,10 @@ function findInlineFunctions(ast: SwcProgram) {
       if (!value) continue;
       if (Array.isArray(value)) {
         for (const child of value) {
-          if (!isSwcNode(child)) continue;
-          if (typeof child.type === "string") {
-            stack.push(child);
-          }
-          const expression = isSwcNode(child.expression)
-            ? child.expression
-            : null;
-          if (expression && typeof expression.type === "string") {
-            stack.push(expression);
-          }
+          pushNode(child);
         }
-      } else if (isSwcNode(value) && typeof value.type === "string") {
-        stack.push(value);
-        const expression = isSwcNode(value.expression)
-          ? value.expression
-          : null;
-        if (expression && typeof expression.type === "string") {
-          stack.push(expression);
-        }
+      } else {
+        pushNode(value);
       }
     }
   }

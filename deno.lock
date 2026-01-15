@@ -5,6 +5,7 @@
     "jsr:@std/fmt@0.224": "0.224.0",
     "jsr:@std/internal@0.224": "0.224.0",
     "npm:@rolldown/pluginutils@^1.0.0-beta.60": "1.0.0-beta.60",
+    "npm:@swc/core@*": "1.15.8",
     "npm:@swc/core@^1.15.8": "1.15.8",
     "npm:@tailwindcss/node@^4.1.18": "4.1.18",
     "npm:@tailwindcss/oxide@^4.1.18": "4.1.18",
