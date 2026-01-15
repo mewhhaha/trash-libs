@@ -90,7 +90,7 @@ type UseClientPluginOptions = {
   expressions from `@rolldown/pluginutils` to widen or narrow the search.
 - `debug` &mdash; Enable debug logging or provide a custom logger callback.
 - `unresolved` &mdash; How to handle references that cannot be bundled into the
-  client chunk (`warn` by default).
+  client chunk (`ignore` by default).
 
 ## ESLint support
 
@@ -121,7 +121,7 @@ Available rules:
 - Only block-bodied arrow or function expressions with a literal `"use client"`
   as their first statement qualify for extraction.
 - Inline handlers may only reference globals, imports, or top-level
-  declarations; anything else is warned about by default (see `unresolved`).
+  declarations; anything else is ignored by default (see `unresolved`).
 - Side-effect-only imports (e.g. `import "./reset.css"`) are not allowed in
   files that contain inline handlers.
 - The replacement uses `new URL(import.meta.ROLLUP_FILE_URL_ref).pathname`. If

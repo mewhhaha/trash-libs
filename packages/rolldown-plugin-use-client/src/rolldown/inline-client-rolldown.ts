@@ -126,6 +126,11 @@ const GLOBALS = new Set([
   "Error",
   "Promise",
   "arguments",
+  "alert",
+  "confirm",
+  "prompt",
+  "HTMLImageElement",
+  "HTMLTextAreaElement",
 ]);
 
 function dummySpan() {
@@ -780,7 +785,7 @@ export default function inlineClientHandlers(
           : options.debug
           ? (msg: string) => this.warn?.(`[use-client] ${msg}`)
           : null;
-        const unresolvedPolicy = options.unresolved ?? "warn";
+        const unresolvedPolicy = options.unresolved ?? "ignore";
 
         const absoluteId = path.isAbsolute(id) ? id : path.resolve(id);
         this.addWatchFile?.(absoluteId);
