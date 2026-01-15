@@ -86,7 +86,6 @@ function isScopeWithin(
 
 function reportExternalReferences(
   context: Rule.RuleContext,
-  sourceCode: SourceCode,
   functionScope: ScopeLike,
 ): void {
   const seen = new Map<string, Identifier>();
@@ -212,7 +211,7 @@ const noInvalidInlineClientClosureRule: Rule.RuleModule = {
           return;
         }
 
-        reportExternalReferences(context, sourceCode, functionScope);
+        reportExternalReferences(context, functionScope);
       },
     };
   },

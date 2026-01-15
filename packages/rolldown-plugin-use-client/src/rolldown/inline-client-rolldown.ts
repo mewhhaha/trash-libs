@@ -12,11 +12,23 @@ import {
   setInlineClientModule,
 } from "./inline-client-registry.ts";
 
+type SwcSpan = { start?: number; end?: number; ctxt?: number };
+
+type SwcNode = {
+  type?: string;
+  span?: SwcSpan;
+  start?: number;
+  end?: number;
+  [key: string]: unknown;
+};
+
+type SwcProgram = SwcNode & { body?: SwcNode[] };
+
 type Replacement = { start: number; end: number; replacement: string };
 
-type ImportInfo = { node: any; code: string };
+type ImportInfo = { node: SwcNode; code: string };
 type DeclarationInfo = {
-  node: any;
+  node: SwcNode;
   code: string;
   declared: Set<string>;
   dependencies: Set<string>;
@@ -120,6 +132,25 @@ function dummySpan() {
   return { start: 0, end: 0, ctxt: 0 };
 }
 
+function isSwcNode(value: unknown): value is SwcNode {
+  return typeof value === "object" && value !== null;
+}
+
+function getNodeType(node: SwcNode): string | undefined {
+  return typeof node.type === "string" ? node.type : undefined;
+}
+
+function getNodeArray(value: unknown): SwcNode[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isSwcNode);
+}
+
+function getIdentifierValue(node: SwcNode | null | undefined): string | null {
+  if (!node) return null;
+  const value = node.value;
+  return typeof value === "string" ? value : null;
+}
+
 function utf8ByteLength(codePoint: number) {
   if (codePoint <= 0x7f) return 1;
   if (codePoint <= 0x7ff) return 2;
@@ -168,57 +199,48 @@ function maybeContainsUseClient(code: string) {
   return code.includes("use client");
 }
 
-function parseModule(code: string) {
+function parseModule(code: string): SwcProgram {
   return parseSync(code, {
     syntax: "typescript",
     tsx: true,
     target: "es2024",
-  }) as any;
+  }) as unknown as SwcProgram;
 }
 
 function getStart(
-  node: any,
+  node: SwcNode,
   offset = 0,
-  offsetIndex = 0,
   toIndex?: (byteOffset: number) => number,
 ) {
   if (node?.span?.start !== undefined) {
-    const absolute = Math.max(0, node.span.start - 1);
-    if (toIndex) {
-      return Math.max(0, toIndex(absolute) - offsetIndex);
-    }
-    return Math.max(0, absolute - offset);
+    const absolute = Math.max(0, node.span.start - 1 - offset);
+    return toIndex ? Math.max(0, toIndex(absolute)) : Math.max(0, absolute);
   }
-  const raw = node?.start ?? 0;
-  return Math.max(0, raw - (toIndex ? offsetIndex : offset));
+  const raw = node.start ?? 0;
+  return Math.max(0, raw - offset);
 }
 
 function getEnd(
-  node: any,
+  node: SwcNode,
   offset = 0,
-  offsetIndex = 0,
   toIndex?: (byteOffset: number) => number,
 ) {
   if (node?.span?.end !== undefined) {
-    const absolute = Math.max(0, node.span.end - 1);
-    if (toIndex) {
-      return Math.max(0, toIndex(absolute) - offsetIndex);
-    }
-    return Math.max(0, absolute - offset);
+    const absolute = Math.max(0, node.span.end - 1 - offset);
+    return toIndex ? Math.max(0, toIndex(absolute)) : Math.max(0, absolute);
   }
-  const raw = node?.end ?? 0;
-  return Math.max(0, raw - (toIndex ? offsetIndex : offset));
+  const raw = node.end ?? 0;
+  return Math.max(0, raw - offset);
 }
 
 function getSpanWithParens(
-  node: any,
+  node: SwcNode,
   code: string,
   offset = 0,
-  offsetIndex = 0,
   toIndex?: (byteOffset: number) => number,
 ) {
-  let start = getStart(node, offset, offsetIndex, toIndex);
-  const end = getEnd(node, offset, offsetIndex, toIndex);
+  let start = getStart(node, offset, toIndex);
+  const end = getEnd(node, offset, toIndex);
   if (start > 0) {
     const prev = code[start - 1];
     const curr = code[start];
@@ -244,27 +266,32 @@ function trimForReplacement(
   return { start, end };
 }
 
-function collectDeclaredFromPattern(pattern: any, target: Set<string>) {
-  if (!pattern) return;
-  switch (pattern.type) {
+function collectDeclaredFromPattern(pattern: unknown, target: Set<string>) {
+  if (!isSwcNode(pattern)) return;
+  const patternType = getNodeType(pattern);
+  if (!patternType) return;
+  switch (patternType) {
     case "Identifier":
-      target.add(pattern.value);
+      if (typeof pattern.value === "string") {
+        target.add(pattern.value);
+      }
       return;
     case "ObjectPattern":
-      for (const prop of pattern.properties ?? []) {
-        if (prop.type === "KeyValuePatternProperty") {
+      for (const prop of getNodeArray(pattern.properties)) {
+        const propType = getNodeType(prop);
+        if (propType === "KeyValuePatternProperty") {
           collectDeclaredFromPattern(prop.value, target);
-        } else if (prop.type === "AssignmentPatternProperty") {
+        } else if (propType === "AssignmentPatternProperty") {
           collectDeclaredFromPattern(prop.key, target);
-        } else if (prop.type === "RestElement") {
+        } else if (propType === "RestElement") {
           collectDeclaredFromPattern(prop.argument, target);
         }
       }
       return;
     case "ArrayPattern":
-      for (const element of pattern.elements ?? []) {
-        if (!element) continue;
-        if (element.type === "RestElement") {
+      for (const element of getNodeArray(pattern.elements)) {
+        const elementType = getNodeType(element);
+        if (elementType === "RestElement") {
           collectDeclaredFromPattern(element.argument, target);
         } else {
           collectDeclaredFromPattern(element, target);
@@ -290,22 +317,24 @@ const TS_VALUE_WRAPPERS = new Set([
   "TsInstantiation",
 ]);
 
-function isTypeOnlyNode(node: any) {
-  if (!node || typeof node.type !== "string") return false;
-  if (!node.type.startsWith("Ts")) return false;
-  if (TS_VALUE_WRAPPERS.has(node.type)) return false;
+function isTypeOnlyNode(node: unknown) {
+  if (!isSwcNode(node)) return false;
+  const nodeType = getNodeType(node);
+  if (!nodeType) return false;
+  if (!nodeType.startsWith("Ts")) return false;
+  if (TS_VALUE_WRAPPERS.has(nodeType)) return false;
   if (
-    node.type === "TsEnumDeclaration" || node.type === "TsConstEnumDeclaration"
+    nodeType === "TsEnumDeclaration" || nodeType === "TsConstEnumDeclaration"
   ) {
     return false;
   }
   return true;
 }
 
-function isIdentifierReference(node: any, parent: any) {
+function isIdentifierReference(node: SwcNode, parent: SwcNode | null) {
   if (!parent) return true;
-
-  switch (parent.type) {
+  const parentType = getNodeType(parent);
+  switch (parentType) {
     case "VariableDeclarator":
       return parent.init === node;
     case "FunctionDeclaration":
@@ -355,24 +384,28 @@ function isDeclared(scopes: Array<Set<string>>, name: string) {
 }
 
 function collectReferences(
-  node: any,
+  node: unknown,
   scopes: Array<Set<string>>,
   out: Set<string>,
-  parent: any,
+  parent: SwcNode | null,
 ) {
-  if (!node) return;
+  if (!isSwcNode(node)) return;
   if (isTypeOnlyNode(node)) return;
 
-  if (node.type === "Identifier") {
+  const nodeType = getNodeType(node);
+  if (!nodeType) return;
+
+  if (nodeType === "Identifier") {
+    const name = typeof node.value === "string" ? node.value : null;
     if (
-      isIdentifierReference(node, parent) && !isDeclared(scopes, node.value)
+      name && isIdentifierReference(node, parent) && !isDeclared(scopes, name)
     ) {
-      out.add(node.value);
+      out.add(name);
     }
     return;
   }
 
-  switch (node.type) {
+  switch (nodeType) {
     case "ImportDeclaration":
     case "ImportSpecifier":
     case "ImportDefaultSpecifier":
@@ -386,12 +419,14 @@ function collectReferences(
     case "FunctionExpression":
     case "ArrowFunctionExpression": {
       const scope = new Set<string>();
-      if (node.identifier?.value) {
-        scope.add(node.identifier.value);
+      const identifier = isSwcNode(node.identifier) ? node.identifier : null;
+      const identifierName = getIdentifierValue(identifier);
+      if (identifierName) {
+        scope.add(identifierName);
       }
-      for (const param of node.params) {
+      for (const param of getNodeArray(node.params)) {
         collectDeclaredFromPattern(param, scope);
-        if (param.type === "AssignmentPattern") {
+        if (getNodeType(param) === "AssignmentPattern") {
           collectReferences(param.right, scopes.concat(scope), out, param);
         }
       }
@@ -403,7 +438,7 @@ function collectReferences(
     case "BlockStatement": {
       const scope = new Set<string>();
       scopes.push(scope);
-      for (const stmt of node.stmts ?? []) {
+      for (const stmt of getNodeArray(node.stmts)) {
         collectReferences(stmt, scopes, out, node);
       }
       scopes.pop();
@@ -412,7 +447,7 @@ function collectReferences(
     case "Program": {
       const scope = new Set<string>();
       scopes.push(scope);
-      for (const stmt of node.body ?? []) {
+      for (const stmt of getNodeArray(node.body)) {
         collectReferences(stmt, scopes, out, node);
       }
       scopes.pop();
@@ -420,7 +455,7 @@ function collectReferences(
     }
     case "VariableDeclaration": {
       const current = scopes[scopes.length - 1];
-      for (const decl of node.declarations) {
+      for (const decl of getNodeArray(node.declarations)) {
         collectDeclaredFromPattern(decl.id, current);
         collectReferences(decl.init, scopes, out, decl);
       }
@@ -429,13 +464,16 @@ function collectReferences(
     case "ClassDeclaration":
     case "ClassExpression": {
       const current = scopes[scopes.length - 1];
-      if (node.identifier?.value) {
-        current.add(node.identifier.value);
+      const identifier = isSwcNode(node.identifier) ? node.identifier : null;
+      const identifierName = getIdentifierValue(identifier);
+      if (identifierName) {
+        current.add(identifierName);
       }
       if (node.superClass) {
         collectReferences(node.superClass, scopes, out, node);
       }
-      for (const element of node.body?.body ?? []) {
+      const classBody = isSwcNode(node.body) ? node.body : null;
+      for (const element of getNodeArray(classBody?.body)) {
         collectReferences(element, scopes, out, element);
       }
       return;
@@ -446,7 +484,7 @@ function collectReferences(
     case "ClassProperty":
     case "ClassPrivateProperty":
     case "ObjectProperty": {
-      if (node.key && node.computed) {
+      if (node.key && node.computed === true) {
         collectReferences(node.key, scopes, out, node);
       }
       collectReferences(node.value, scopes, out, node);
@@ -456,58 +494,64 @@ function collectReferences(
       break;
   }
 
-  for (const key of Object.keys(node)) {
+  const nodeRecord = node as Record<string, unknown>;
+  for (const key of Object.keys(nodeRecord)) {
     if (
       key === "start" || key === "end" || key === "type" || key === "loc" ||
       key === "span" || key === "ctxt"
     ) continue;
-    const value: any = (node as any)[key];
+    const value = nodeRecord[key];
     if (!value) continue;
     if (Array.isArray(value)) {
       for (const child of value) {
-        if (!child) continue;
+        if (!isSwcNode(child)) continue;
         if (typeof child.type === "string") {
           collectReferences(child, scopes, out, node);
-        } else if (
-          child.expression && typeof child.expression.type === "string"
-        ) {
-          collectReferences(child.expression, scopes, out, node);
+        }
+        const expression = isSwcNode(child.expression)
+          ? child.expression
+          : null;
+        if (expression && typeof expression.type === "string") {
+          collectReferences(expression, scopes, out, node);
         }
       }
-    } else if (value && typeof value.type === "string") {
+    } else if (isSwcNode(value) && typeof value.type === "string") {
       collectReferences(value, scopes, out, node);
-    } else if (
-      value && value.expression && typeof value.expression.type === "string"
-    ) {
-      collectReferences(value.expression, scopes, out, node);
+      const expression = isSwcNode(value.expression) ? value.expression : null;
+      if (expression && typeof expression.type === "string") {
+        collectReferences(expression, scopes, out, node);
+      }
     }
   }
 }
 
 function buildImportMap(
-  ast: any,
+  ast: SwcProgram,
   code: string,
   offset: number,
-  offsetIndex: number,
   toIndex?: (byteOffset: number) => number,
 ) {
   const map = new Map<string, ImportInfo>();
 
-  for (const stmt of ast.body ?? []) {
-    if (stmt.type !== "ImportDeclaration") continue;
-    if (stmt.typeOnly) continue;
+  for (const stmt of getNodeArray(ast.body)) {
+    if (getNodeType(stmt) !== "ImportDeclaration") continue;
+    if (stmt.typeOnly === true) continue;
     const importCode = code.slice(
-      getStart(stmt, offset, offsetIndex, toIndex),
-      getEnd(stmt, offset, offsetIndex, toIndex),
+      getStart(stmt, offset, toIndex),
+      getEnd(stmt, offset, toIndex),
     );
-    for (const spec of stmt.specifiers ?? []) {
-      if (spec.type === "ImportSpecifier") {
-        if (spec.isTypeOnly) continue;
-        map.set(spec.local.value, { node: stmt, code: importCode });
-      } else if (spec.type === "ImportDefaultSpecifier") {
-        map.set(spec.local.value, { node: stmt, code: importCode });
-      } else if (spec.type === "ImportNamespaceSpecifier") {
-        map.set(spec.local.value, { node: stmt, code: importCode });
+    for (const spec of getNodeArray(stmt.specifiers)) {
+      const specType = getNodeType(spec);
+      const local = isSwcNode(spec.local) ? spec.local : null;
+      const localName = getIdentifierValue(local);
+      if (!localName) continue;
+      if (specType === "ImportSpecifier") {
+        if (spec.isTypeOnly === true) continue;
+        map.set(localName, { node: stmt, code: importCode });
+      } else if (specType === "ImportDefaultSpecifier") {
+        map.set(localName, { node: stmt, code: importCode });
+      } else if (specType === "ImportNamespaceSpecifier") {
+        map.set(localName, { node: stmt, code: importCode });
       }
     }
   }
@@ -516,71 +560,73 @@ function buildImportMap(
 }
 
 function collectTopLevelDeclarationInfo(
-  stmt: any,
+  stmt: SwcNode,
   code: string,
   offset: number,
-  offsetIndex: number,
   toIndex?: (byteOffset: number) => number,
 ): DeclarationInfo | null {
-  if (stmt.type === "ExportDeclaration" && stmt.declaration) {
-    stmt = stmt.declaration;
-  }
-
-  if (
-    stmt.type === "FunctionDeclaration" ||
-    stmt.type === "VariableDeclaration" ||
-    stmt.type === "ClassDeclaration" ||
-    stmt.type === "TsEnumDeclaration" ||
-    stmt.type === "TsConstEnumDeclaration"
-  ) {
-    const declared = new Set<string>();
-    if (stmt.type === "FunctionDeclaration" && stmt.identifier?.value) {
-      declared.add(stmt.identifier.value);
-    } else if (stmt.type === "VariableDeclaration") {
-      for (const decl of stmt.declarations) {
-        collectDeclaredFromPattern(decl.id, declared);
-      }
-    } else if (
-      (stmt.type === "ClassDeclaration" ||
-        stmt.type === "TsEnumDeclaration" ||
-        stmt.type === "TsConstEnumDeclaration") &&
-      (stmt.identifier?.value || stmt.id?.value)
-    ) {
-      declared.add(stmt.identifier?.value ?? stmt.id?.value);
+  let target = stmt;
+  if (getNodeType(target) === "ExportDeclaration") {
+    const decl = isSwcNode(target.declaration) ? target.declaration : null;
+    if (decl) {
+      target = decl;
     }
-
-    const deps = new Set<string>();
-    collectReferences(stmt, [declared], deps, null);
-
-    return {
-      node: stmt,
-      code: code.slice(
-        getStart(stmt, offset, offsetIndex, toIndex),
-        getEnd(stmt, offset, offsetIndex, toIndex),
-      ),
-      declared,
-      dependencies: deps,
-    };
   }
-  return null;
+
+  const targetType = getNodeType(target);
+  if (
+    targetType !== "FunctionDeclaration" &&
+    targetType !== "VariableDeclaration" &&
+    targetType !== "ClassDeclaration" &&
+    targetType !== "TsEnumDeclaration" &&
+    targetType !== "TsConstEnumDeclaration"
+  ) {
+    return null;
+  }
+
+  const declared = new Set<string>();
+  if (targetType === "FunctionDeclaration") {
+    const identifier = isSwcNode(target.identifier) ? target.identifier : null;
+    const name = getIdentifierValue(identifier);
+    if (name) {
+      declared.add(name);
+    }
+  } else if (targetType === "VariableDeclaration") {
+    for (const decl of getNodeArray(target.declarations)) {
+      collectDeclaredFromPattern(decl.id, declared);
+    }
+  } else {
+    const identifier = isSwcNode(target.identifier) ? target.identifier : null;
+    const id = isSwcNode(target.id) ? target.id : null;
+    const name = getIdentifierValue(identifier) ?? getIdentifierValue(id);
+    if (name) {
+      declared.add(name);
+    }
+  }
+
+  const deps = new Set<string>();
+  collectReferences(target, [declared], deps, null);
+
+  return {
+    node: target,
+    code: code.slice(
+      getStart(target, offset, toIndex),
+      getEnd(target, offset, toIndex),
+    ),
+    declared,
+    dependencies: deps,
+  };
 }
 
 function buildDeclarationMap(
-  ast: any,
+  ast: SwcProgram,
   code: string,
   offset: number,
-  offsetIndex: number,
   toIndex?: (byteOffset: number) => number,
 ) {
   const map = new Map<string, DeclarationInfo>();
-  for (const stmt of ast.body ?? []) {
-    const info = collectTopLevelDeclarationInfo(
-      stmt,
-      code,
-      offset,
-      offsetIndex,
-      toIndex,
-    );
+  for (const stmt of getNodeArray(ast.body)) {
+    const info = collectTopLevelDeclarationInfo(stmt, code, offset, toIndex);
     if (!info) continue;
     for (const name of info.declared) {
       map.set(name, info);
@@ -589,70 +635,83 @@ function buildDeclarationMap(
   return map;
 }
 
-function stripUseClientDirective(fnNode: any) {
-  const stmts = fnNode.body?.stmts ?? [];
+function stripUseClientDirective(fnNode: SwcNode) {
+  const body = isSwcNode(fnNode.body) ? fnNode.body : null;
+  const stmts = getNodeArray(body?.stmts);
+  const first = stmts[0];
   if (
-    stmts.length > 0 &&
-    stmts[0].type === "ExpressionStatement" &&
-    stmts[0].expression?.type === "StringLiteral" &&
-    stmts[0].expression.value === "use client"
+    first &&
+    getNodeType(first) === "ExpressionStatement" &&
+    isSwcNode(first.expression) &&
+    getNodeType(first.expression) === "StringLiteral" &&
+    first.expression.value === "use client"
   ) {
-    const body = { ...fnNode.body, stmts: stmts.slice(1) };
-    return { ...fnNode, body };
+    const nextBody = body ? { ...body, stmts: stmts.slice(1) } : null;
+    return nextBody ? { ...fnNode, body: nextBody } : fnNode;
   }
   return fnNode;
 }
 
-function findInlineFunctions(ast: any) {
-  const matches: Array<{ node: any }> = [];
-  const stack: Array<any> = [ast];
+function findInlineFunctions(ast: SwcProgram) {
+  const matches: Array<{ node: SwcNode }> = [];
+  const stack: SwcNode[] = [ast];
 
   while (stack.length) {
     const node = stack.pop();
     if (!node) continue;
 
+    const nodeType = getNodeType(node);
     if (
-      (node.type === "ArrowFunctionExpression" ||
-        node.type === "FunctionExpression") &&
-      node.body &&
-      node.body.type === "BlockStatement" &&
-      node.body.stmts &&
-      node.body.stmts.length > 0
+      nodeType === "ArrowFunctionExpression" ||
+      nodeType === "FunctionExpression"
     ) {
-      const first = node.body.stmts[0];
-      const hasDirective = first &&
-        first.type === "ExpressionStatement" &&
-        first.expression?.type === "StringLiteral" &&
-        first.expression.value === "use client";
-      if (hasDirective) {
-        matches.push({ node });
+      const body = isSwcNode(node.body) ? node.body : null;
+      if (body && getNodeType(body) === "BlockStatement") {
+        const stmts = getNodeArray(body.stmts);
+        const first = stmts[0];
+        const expression = first && isSwcNode(first.expression)
+          ? first.expression
+          : null;
+        const hasDirective = first &&
+          getNodeType(first) === "ExpressionStatement" &&
+          expression &&
+          getNodeType(expression) === "StringLiteral" &&
+          expression.value === "use client";
+        if (hasDirective) {
+          matches.push({ node });
+        }
       }
     }
 
-    for (const key of Object.keys(node)) {
+    const nodeRecord = node as Record<string, unknown>;
+    for (const key of Object.keys(nodeRecord)) {
       if (
         key === "start" || key === "end" || key === "type" || key === "loc" ||
         key === "span" || key === "ctxt"
       ) continue;
-      const value: any = (node as any)[key];
+      const value = nodeRecord[key];
       if (!value) continue;
       if (Array.isArray(value)) {
         for (const child of value) {
-          if (!child) continue;
+          if (!isSwcNode(child)) continue;
           if (typeof child.type === "string") {
             stack.push(child);
-          } else if (
-            child.expression && typeof child.expression.type === "string"
-          ) {
-            stack.push(child.expression);
+          }
+          const expression = isSwcNode(child.expression)
+            ? child.expression
+            : null;
+          if (expression && typeof expression.type === "string") {
+            stack.push(expression);
           }
         }
-      } else if (value && typeof value.type === "string") {
+      } else if (isSwcNode(value) && typeof value.type === "string") {
         stack.push(value);
-      } else if (
-        value && value.expression && typeof value.expression.type === "string"
-      ) {
-        stack.push(value.expression);
+        const expression = isSwcNode(value.expression)
+          ? value.expression
+          : null;
+        if (expression && typeof expression.type === "string") {
+          stack.push(expression);
+        }
       }
     }
   }
@@ -701,7 +760,7 @@ export default function inlineClientHandlers(
 
     transform: {
       filter: transformFilter,
-      async handler(this: TransformPluginContext, code, id) {
+      handler(this: TransformPluginContext, code, id) {
         if (id.startsWith("\0")) return;
         if (!maybeContainsUseClient(code)) return;
 
@@ -721,7 +780,7 @@ export default function inlineClientHandlers(
         const absoluteId = path.isAbsolute(id) ? id : path.resolve(id);
         this.addWatchFile?.(absoluteId);
 
-        let ast: any;
+        let ast: SwcProgram;
         try {
           ast = parseModule(code);
         } catch (error) {
@@ -731,9 +790,8 @@ export default function inlineClientHandlers(
           return;
         }
 
-        const offset = Math.max(0, (ast?.span?.start ?? 1) - 1);
+        const offset = Math.max(0, (ast.span?.start ?? 1) - 1);
         const byteOffsetToIndex = createByteOffsetLookup(code);
-        const offsetIndex = byteOffsetToIndex(offset);
 
         const inlineFunctions = findInlineFunctions(ast);
         if (inlineFunctions.length === 0) {
@@ -744,18 +802,17 @@ export default function inlineClientHandlers(
           `processing ${absoluteId} (len=${code.length}) with ${inlineFunctions.length} inline handlers`,
         );
 
-        const sideEffectImports = (ast.body ?? []).filter(
-          (stmt: any) =>
-            stmt.type === "ImportDeclaration" &&
-            (stmt.specifiers?.length ?? 0) === 0 &&
-            stmt.typeOnly !== true,
+        const sideEffectImports = getNodeArray(ast.body).filter((stmt) =>
+          getNodeType(stmt) === "ImportDeclaration" &&
+          getNodeArray(stmt.specifiers).length === 0 &&
+          stmt.typeOnly !== true
         );
         if (sideEffectImports.length > 0) {
           const first = sideEffectImports[0];
           const snippet = code
             .slice(
-              getStart(first, offset, offsetIndex, byteOffsetToIndex),
-              getEnd(first, offset, offsetIndex, byteOffsetToIndex),
+              getStart(first, offset, byteOffsetToIndex),
+              getEnd(first, offset, byteOffsetToIndex),
             )
             .trim();
           fail(
@@ -764,18 +821,11 @@ export default function inlineClientHandlers(
           );
         }
 
-        const importMap = buildImportMap(
-          ast,
-          code,
-          offset,
-          offsetIndex,
-          byteOffsetToIndex,
-        );
+        const importMap = buildImportMap(ast, code, offset, byteOffsetToIndex);
         const declarationMap = buildDeclarationMap(
           ast,
           code,
           offset,
-          offsetIndex,
           byteOffsetToIndex,
         );
 
@@ -788,7 +838,7 @@ export default function inlineClientHandlers(
         for (const { node } of inlineFunctions) {
           const cleanedFn = stripUseClientDirective(node);
 
-          const exportModule: any = {
+          const exportModule: SwcNode = {
             type: "Module",
             span: dummySpan(),
             body: [
@@ -802,20 +852,20 @@ export default function inlineClientHandlers(
             shebang: null,
           };
 
-          const { code: exportedHandlerCode } = printSync(exportModule as any, {
-            minify: false,
-            isModule: true,
-          });
+          const { code: exportedHandlerCode } = printSync(
+            exportModule as unknown as Parameters<typeof printSync>[0],
+            {
+              minify: false,
+              isModule: true,
+            },
+          );
 
+          const bodyNode = isSwcNode(node.body) ? node.body : node;
           debugLog?.(
-            `handler span [${
-              getStart(node, offset, offsetIndex, byteOffsetToIndex)
-            }, ${
-              getEnd(node, offset, offsetIndex, byteOffsetToIndex)
-            }], body span [${
-              getStart(node.body, offset, offsetIndex, byteOffsetToIndex)
-            }, ${
-              getEnd(node.body, offset, offsetIndex, byteOffsetToIndex)
+            `handler span [${getStart(node, offset, byteOffsetToIndex)}, ${
+              getEnd(node, offset, byteOffsetToIndex)
+            }], body span [${getStart(bodyNode, offset, byteOffsetToIndex)}, ${
+              getEnd(bodyNode, offset, byteOffsetToIndex)
             }], exported code: ${
               exportedHandlerCode.slice(0, 60).replace(/\s+/g, " ")
             }...`,
@@ -824,7 +874,6 @@ export default function inlineClientHandlers(
             node,
             code,
             offset,
-            offsetIndex,
             byteOffsetToIndex,
           );
           const span = trimForReplacement(rawSpan, code);
@@ -844,8 +893,8 @@ export default function inlineClientHandlers(
           const rootScope = new Set<string>();
           collectReferences(node, [rootScope], freeRefs, null);
 
-          const requiredImports = new Map<any, ImportInfo>();
-          const requiredDeclarations = new Map<any, DeclarationInfo>();
+          const requiredImports = new Map<SwcNode, ImportInfo>();
+          const requiredDeclarations = new Map<SwcNode, DeclarationInfo>();
 
           const pending = [...freeRefs].filter((name) => !GLOBALS.has(name));
           const seen = new Set(pending);
@@ -885,8 +934,8 @@ export default function inlineClientHandlers(
 
           const sortedImports = Array.from(requiredImports.values()).sort(
             (a, b) =>
-              getStart(a.node, offset, offsetIndex, byteOffsetToIndex) -
-              getStart(b.node, offset, offsetIndex, byteOffsetToIndex),
+              getStart(a.node, offset, byteOffsetToIndex) -
+              getStart(b.node, offset, byteOffsetToIndex),
           );
           const importCode = sortedImports.length > 0
             ? `${sortedImports.map((info) => info.code.trim()).join("\n")}\n\n`
@@ -895,8 +944,8 @@ export default function inlineClientHandlers(
           const sortedDeclarations = Array.from(requiredDeclarations.values())
             .sort(
               (a, b) =>
-                getStart(a.node, offset, offsetIndex, byteOffsetToIndex) -
-                getStart(b.node, offset, offsetIndex, byteOffsetToIndex),
+                getStart(a.node, offset, byteOffsetToIndex) -
+                getStart(b.node, offset, byteOffsetToIndex),
             );
           const declarationCode = sortedDeclarations.length > 0
             ? `${
@@ -906,9 +955,7 @@ export default function inlineClientHandlers(
 
           const hash = createHash("sha1")
             .update(fileHash)
-            .update(
-              String(getStart(node, offset, offsetIndex, byteOffsetToIndex)),
-            )
+            .update(String(getStart(node, offset, byteOffsetToIndex)))
             .digest("hex")
             .slice(0, 12);
 

@@ -1,6 +1,6 @@
 {
   "name": "@mewhhaha/rolldown-plugin-tailwindcss",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "license": "MIT",
   "exports": {
     ".": "./src/index.ts"
@@ -15,8 +15,7 @@
     "lint": "deno lint"
   },
   "compilerOptions": {
-    "types": ["npm:@types/node@^24.9.2"],
-    "allowImportingTsExtensions": true
+    "types": ["npm:@types/node@^24.9.2"]
   },
   "publish": {
     "exclude": ["./dist", "./node_modules", "./tsconfig.json"]

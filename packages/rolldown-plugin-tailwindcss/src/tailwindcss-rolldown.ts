@@ -3,6 +3,7 @@ import { Scanner } from "@tailwindcss/oxide";
 import { exclude, id, include } from "@rolldown/pluginutils";
 import type { TopLevelFilterExpression } from "@rolldown/pluginutils";
 import path from "node:path";
+import process from "node:process";
 import type { Plugin, TransformPluginContext } from "rolldown";
 
 const hasTailwindDirective = (code: string) =>
