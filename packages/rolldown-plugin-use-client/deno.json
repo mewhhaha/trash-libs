@@ -1,27 +1,27 @@
 {
-    "name": "@mewhhaha/rolldown-plugin-use-client",
-    "version": "0.0.15",
-    "exports": {
-        ".": "./src/index.ts",
-        "./eslint-plugin": "./src/eslint/use-client-plugin.ts"
-    },
-    "license": "MIT",
-    "imports": {
-        "@swc/core": "npm:@swc/core@^1.9.2",
-        "@rolldown/pluginutils": "npm:@rolldown/pluginutils@^1.0.0-beta.52",
-        "eslint": "npm:eslint@^9.39.1",
-        "estree": "npm:@types/estree@^1.0.8",
-        "rolldown": "npm:rolldown@^1.0.0-beta.52",
-        "typescript": "npm:typescript@^5.9.3"
-    },
-    "tasks": {
-        "lint": "deno lint",
-        "test": "deno test"
-    },
-    "compilerOptions": {
-        "types": ["npm:@types/node@^24.9.2"]
-    },
-    "publish": {
-        "exclude": ["./dist", "./node_modules", "./tsconfig.json"]
-    }
+  "name": "@mewhhaha/rolldown-plugin-use-client",
+  "version": "0.0.15",
+  "exports": {
+    ".": "./src/index.ts",
+    "./eslint-plugin": "./src/eslint/use-client-plugin.ts"
+  },
+  "license": "MIT",
+  "imports": {
+    "@swc/core": "npm:@swc/core@^1.15.8",
+    "@rolldown/pluginutils": "npm:@rolldown/pluginutils@^1.0.0-beta.60",
+    "eslint": "npm:eslint@^9.39.2",
+    "estree": "npm:@types/estree@^1.0.8",
+    "rolldown": "npm:rolldown@^1.0.0-beta.60",
+    "typescript": "npm:typescript@^5.9.3"
+  },
+  "tasks": {
+    "lint": "deno lint",
+    "test": "deno test"
+  },
+  "compilerOptions": {
+    "types": ["npm:@types/node@^24.9.2"]
+  },
+  "publish": {
+    "exclude": ["./dist", "./node_modules", "./tsconfig.json"]
+  }
 }

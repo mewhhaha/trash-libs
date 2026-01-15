@@ -1,4 +1,8 @@
-import { assert, assertExists } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertExists,
+  assertRejects,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import path from "node:path";
 import { rolldown } from "rolldown";
 import useClient from "./inline-client-rolldown.ts";
@@ -62,7 +66,7 @@ export function serverOnly() {
     const modulesBefore = listInlineClientModules();
     console.log("inline modules", modulesBefore);
     const emptyDefault = modulesBefore.find((m) =>
-      /export default\s*;/.test(m.code),
+      /export default\s*;/.test(m.code)
     );
     assert(
       !emptyDefault,
@@ -140,7 +144,10 @@ export default function Demo() {
     );
 
     const moduleCode = getInlineClientModule(clientChunk.facadeModuleId);
-    assertExists(moduleCode, "inline module code should be present in registry");
+    assertExists(
+      moduleCode,
+      "inline module code should be present in registry",
+    );
     assert(
       moduleCode.includes("TrashIcon"),
       "registry module should keep JSX content",
@@ -169,6 +176,8 @@ Deno.test("sequential inline handlers keep separators intact", async () => {
   };
 
   const code = `
+import { event, submit } from "./client.ts";
+
 const signin = event.click(async (_, signal) => {
   "use client";
   await submit("/auth/challenge", { signal });
@@ -185,10 +194,9 @@ const register = event.submit(
 );
 `;
 
-  const handler =
-    typeof plugin.transform === "function"
-      ? plugin.transform
-      : (plugin.transform as any)?.handler;
+  const handler = typeof plugin.transform === "function"
+    ? plugin.transform
+    : (plugin.transform as any)?.handler;
 
   const result: any = await handler.call(ctx as any, code, "/tmp/inline.tsx");
 
@@ -202,4 +210,103 @@ const register = event.submit(
     between.includes(";"),
     "client handler replacements should be separated by a statement boundary",
   );
+});
+
+Deno.test("inline handler rejects side-effect imports", async () => {
+  const plugin = useClient();
+  const handler = typeof plugin.transform === "function"
+    ? plugin.transform
+    : (plugin.transform as any)?.handler;
+
+  const ctx = {
+    warn: () => {},
+    addWatchFile: () => {},
+    emitFile() {
+      return "ref_0";
+    },
+    error(message: string) {
+      throw new Error(message);
+    },
+  };
+
+  const code = `
+import "./reset.css";
+
+const handler = () => {
+  "use client";
+  return 1;
+};
+`;
+
+  await assertRejects(
+    () => handler.call(ctx as any, code, "/tmp/inline-side-effect.tsx"),
+    Error,
+    "side-effect imports",
+  );
+});
+
+Deno.test("inline handler rejects unresolved references", async () => {
+  const plugin = useClient();
+  const handler = typeof plugin.transform === "function"
+    ? plugin.transform
+    : (plugin.transform as any)?.handler;
+
+  const ctx = {
+    warn: () => {},
+    addWatchFile: () => {},
+    emitFile() {
+      return "ref_0";
+    },
+    error(message: string) {
+      throw new Error(message);
+    },
+  };
+
+  const code = `
+export function Component() {
+  const local = "nope";
+  const handler = () => {
+    "use client";
+    return local;
+  };
+  return handler;
+}
+`;
+
+  await assertRejects(
+    () => handler.call(ctx as any, code, "/tmp/inline-unresolved.tsx"),
+    Error,
+    "references values",
+  );
+});
+
+Deno.test("inline handler hash follows file contents", async () => {
+  const plugin = useClient();
+  const handler = typeof plugin.transform === "function"
+    ? plugin.transform
+    : (plugin.transform as any)?.handler;
+
+  const fileNames: string[] = [];
+  const makeCtx = () => ({
+    warn: () => {},
+    addWatchFile: () => {},
+    emitFile(chunk: any) {
+      fileNames.push(chunk.fileName);
+      return `ref_${fileNames.length - 1}`;
+    },
+  });
+
+  const code = `
+export const handler = () => {
+  "use client";
+  return "ok";
+};
+`;
+
+  await handler.call(makeCtx() as any, code, "/tmp/alpha.tsx");
+  await handler.call(makeCtx() as any, code, "/tmp/beta.tsx");
+
+  const hashA = fileNames[0]?.split(".")[1];
+  const hashB = fileNames[1]?.split(".")[1];
+  assert(hashA && hashB && hashA === hashB, "hash should be content-based");
 });

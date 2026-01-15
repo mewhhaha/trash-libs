@@ -5,9 +5,9 @@ import path from "node:path";
 import type { Plugin, TransformPluginContext } from "rolldown";
 import { parseSync, printSync } from "@swc/core";
 import {
-  INLINE_ID_PREFIX,
   clearInlineClientModules,
   getInlineClientModule,
+  INLINE_ID_PREFIX,
   parseInlineModulePath,
   setInlineClientModule,
 } from "./inline-client-registry.ts";
@@ -26,21 +26,35 @@ const GLOBALS = new Set([
   "undefined",
   "NaN",
   "Infinity",
+  "global",
   "console",
   "window",
   "document",
+  "Document",
+  "DocumentFragment",
+  "Element",
+  "Node",
+  "EventTarget",
   "self",
   "globalThis",
   "navigator",
+  "history",
   "location",
   "performance",
   "setTimeout",
   "clearTimeout",
   "setInterval",
   "clearInterval",
+  "setImmediate",
+  "clearImmediate",
   "queueMicrotask",
   "requestAnimationFrame",
   "cancelAnimationFrame",
+  "requestIdleCallback",
+  "cancelIdleCallback",
+  "structuredClone",
+  "atob",
+  "btoa",
   "fetch",
   "Headers",
   "Request",
@@ -50,15 +64,40 @@ const GLOBALS = new Set([
   "URLSearchParams",
   "AbortController",
   "AbortSignal",
+  "ReadableStream",
+  "WritableStream",
+  "TransformStream",
   "Event",
+  "CustomEvent",
   "MouseEvent",
   "SubmitEvent",
   "KeyboardEvent",
+  "MessageEvent",
+  "StorageEvent",
   "HTMLElement",
   "HTMLFormElement",
   "HTMLInputElement",
   "HTMLButtonElement",
   "HTMLDivElement",
+  "SVGElement",
+  "SVGSVGElement",
+  "DOMException",
+  "DOMParser",
+  "CSSStyleSheet",
+  "CSSStyleDeclaration",
+  "ShadowRoot",
+  "MutationObserver",
+  "IntersectionObserver",
+  "ResizeObserver",
+  "File",
+  "FileList",
+  "FileReader",
+  "Blob",
+  "TextEncoder",
+  "TextDecoder",
+  "Intl",
+  "crypto",
+  "Crypto",
   "Map",
   "Set",
   "WeakMap",
@@ -81,6 +120,50 @@ function dummySpan() {
   return { start: 0, end: 0, ctxt: 0 };
 }
 
+function utf8ByteLength(codePoint: number) {
+  if (codePoint <= 0x7f) return 1;
+  if (codePoint <= 0x7ff) return 2;
+  if (codePoint <= 0xffff) return 3;
+  return 4;
+}
+
+function createByteOffsetLookup(code: string) {
+  const byteOffsets: number[] = [0];
+  const indices: number[] = [0];
+  let byteOffset = 0;
+
+  for (let i = 0; i < code.length; i += 1) {
+    const codePoint = code.codePointAt(i);
+    if (codePoint === undefined) break;
+    byteOffset += utf8ByteLength(codePoint);
+    const nextIndex = codePoint > 0xffff ? i + 2 : i + 1;
+    byteOffsets.push(byteOffset);
+    indices.push(nextIndex);
+    i = nextIndex - 1;
+  }
+
+  return (target: number) => {
+    if (target <= 0) return 0;
+    const lastIndex = byteOffsets.length - 1;
+    if (target >= byteOffsets[lastIndex]) return indices[lastIndex];
+    let lo = 0;
+    let hi = lastIndex;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const midOffset = byteOffsets[mid];
+      if (midOffset === target) {
+        return indices[mid];
+      }
+      if (midOffset < target) {
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return indices[Math.max(0, hi)];
+  };
+}
+
 function maybeContainsUseClient(code: string) {
   return code.includes("use client");
 }
@@ -93,23 +176,49 @@ function parseModule(code: string) {
   }) as any;
 }
 
-function getStart(node: any, offset = 0) {
+function getStart(
+  node: any,
+  offset = 0,
+  offsetIndex = 0,
+  toIndex?: (byteOffset: number) => number,
+) {
   if (node?.span?.start !== undefined) {
-    return Math.max(0, node.span.start - 1 - offset);
+    const absolute = Math.max(0, node.span.start - 1);
+    if (toIndex) {
+      return Math.max(0, toIndex(absolute) - offsetIndex);
+    }
+    return Math.max(0, absolute - offset);
   }
-  return (node?.start ?? 0) - offset;
+  const raw = node?.start ?? 0;
+  return Math.max(0, raw - (toIndex ? offsetIndex : offset));
 }
 
-function getEnd(node: any, offset = 0) {
+function getEnd(
+  node: any,
+  offset = 0,
+  offsetIndex = 0,
+  toIndex?: (byteOffset: number) => number,
+) {
   if (node?.span?.end !== undefined) {
-    return Math.max(0, node.span.end - 1 - offset);
+    const absolute = Math.max(0, node.span.end - 1);
+    if (toIndex) {
+      return Math.max(0, toIndex(absolute) - offsetIndex);
+    }
+    return Math.max(0, absolute - offset);
   }
-  return (node?.end ?? 0) - offset;
+  const raw = node?.end ?? 0;
+  return Math.max(0, raw - (toIndex ? offsetIndex : offset));
 }
 
-function getSpanWithParens(node: any, code: string, offset = 0) {
-  let start = getStart(node, offset);
-  const end = getEnd(node, offset);
+function getSpanWithParens(
+  node: any,
+  code: string,
+  offset = 0,
+  offsetIndex = 0,
+  toIndex?: (byteOffset: number) => number,
+) {
+  let start = getStart(node, offset, offsetIndex, toIndex);
+  const end = getEnd(node, offset, offsetIndex, toIndex);
   if (start > 0) {
     const prev = code[start - 1];
     const curr = code[start];
@@ -120,7 +229,10 @@ function getSpanWithParens(node: any, code: string, offset = 0) {
   return { start, end };
 }
 
-function trimForReplacement(span: { start: number; end: number }, code: string) {
+function trimForReplacement(
+  span: { start: number; end: number },
+  code: string,
+) {
   let { start, end } = span;
   while (end > start && /\s/.test(code[end - 1])) {
     end -= 1;
@@ -168,6 +280,26 @@ function collectDeclaredFromPattern(pattern: any, target: Set<string>) {
     default:
       return;
   }
+}
+
+const TS_VALUE_WRAPPERS = new Set([
+  "TsAsExpression",
+  "TsTypeAssertion",
+  "TsNonNullExpression",
+  "TsSatisfiesExpression",
+  "TsInstantiation",
+]);
+
+function isTypeOnlyNode(node: any) {
+  if (!node || typeof node.type !== "string") return false;
+  if (!node.type.startsWith("Ts")) return false;
+  if (TS_VALUE_WRAPPERS.has(node.type)) return false;
+  if (
+    node.type === "TsEnumDeclaration" || node.type === "TsConstEnumDeclaration"
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function isIdentifierReference(node: any, parent: any) {
@@ -222,11 +354,19 @@ function isDeclared(scopes: Array<Set<string>>, name: string) {
   return false;
 }
 
-function collectReferences(node: any, scopes: Array<Set<string>>, out: Set<string>, parent: any) {
+function collectReferences(
+  node: any,
+  scopes: Array<Set<string>>,
+  out: Set<string>,
+  parent: any,
+) {
   if (!node) return;
+  if (isTypeOnlyNode(node)) return;
 
   if (node.type === "Identifier") {
-    if (isIdentifierReference(node, parent) && !isDeclared(scopes, node.value)) {
+    if (
+      isIdentifierReference(node, parent) && !isDeclared(scopes, node.value)
+    ) {
       out.add(node.value);
     }
     return;
@@ -317,7 +457,10 @@ function collectReferences(node: any, scopes: Array<Set<string>>, out: Set<strin
   }
 
   for (const key of Object.keys(node)) {
-    if (key === "start" || key === "end" || key === "type" || key === "loc" || key === "span" || key === "ctxt") continue;
+    if (
+      key === "start" || key === "end" || key === "type" || key === "loc" ||
+      key === "span" || key === "ctxt"
+    ) continue;
     const value: any = (node as any)[key];
     if (!value) continue;
     if (Array.isArray(value)) {
@@ -325,25 +468,38 @@ function collectReferences(node: any, scopes: Array<Set<string>>, out: Set<strin
         if (!child) continue;
         if (typeof child.type === "string") {
           collectReferences(child, scopes, out, node);
-        } else if (child.expression && typeof child.expression.type === "string") {
+        } else if (
+          child.expression && typeof child.expression.type === "string"
+        ) {
           collectReferences(child.expression, scopes, out, node);
         }
       }
     } else if (value && typeof value.type === "string") {
       collectReferences(value, scopes, out, node);
-    } else if (value && value.expression && typeof value.expression.type === "string") {
+    } else if (
+      value && value.expression && typeof value.expression.type === "string"
+    ) {
       collectReferences(value.expression, scopes, out, node);
     }
   }
 }
 
-function buildImportMap(ast: any, code: string, offset: number) {
+function buildImportMap(
+  ast: any,
+  code: string,
+  offset: number,
+  offsetIndex: number,
+  toIndex?: (byteOffset: number) => number,
+) {
   const map = new Map<string, ImportInfo>();
 
   for (const stmt of ast.body ?? []) {
     if (stmt.type !== "ImportDeclaration") continue;
     if (stmt.typeOnly) continue;
-    const importCode = code.slice(getStart(stmt, offset), getEnd(stmt, offset));
+    const importCode = code.slice(
+      getStart(stmt, offset, offsetIndex, toIndex),
+      getEnd(stmt, offset, offsetIndex, toIndex),
+    );
     for (const spec of stmt.specifiers ?? []) {
       if (spec.type === "ImportSpecifier") {
         if (spec.isTypeOnly) continue;
@@ -363,6 +519,8 @@ function collectTopLevelDeclarationInfo(
   stmt: any,
   code: string,
   offset: number,
+  offsetIndex: number,
+  toIndex?: (byteOffset: number) => number,
 ): DeclarationInfo | null {
   if (stmt.type === "ExportDeclaration" && stmt.declaration) {
     stmt = stmt.declaration;
@@ -371,7 +529,9 @@ function collectTopLevelDeclarationInfo(
   if (
     stmt.type === "FunctionDeclaration" ||
     stmt.type === "VariableDeclaration" ||
-    stmt.type === "ClassDeclaration"
+    stmt.type === "ClassDeclaration" ||
+    stmt.type === "TsEnumDeclaration" ||
+    stmt.type === "TsConstEnumDeclaration"
   ) {
     const declared = new Set<string>();
     if (stmt.type === "FunctionDeclaration" && stmt.identifier?.value) {
@@ -380,8 +540,13 @@ function collectTopLevelDeclarationInfo(
       for (const decl of stmt.declarations) {
         collectDeclaredFromPattern(decl.id, declared);
       }
-    } else if (stmt.type === "ClassDeclaration" && stmt.identifier?.value) {
-      declared.add(stmt.identifier.value);
+    } else if (
+      (stmt.type === "ClassDeclaration" ||
+        stmt.type === "TsEnumDeclaration" ||
+        stmt.type === "TsConstEnumDeclaration") &&
+      (stmt.identifier?.value || stmt.id?.value)
+    ) {
+      declared.add(stmt.identifier?.value ?? stmt.id?.value);
     }
 
     const deps = new Set<string>();
@@ -389,7 +554,10 @@ function collectTopLevelDeclarationInfo(
 
     return {
       node: stmt,
-      code: code.slice(getStart(stmt, offset), getEnd(stmt, offset)),
+      code: code.slice(
+        getStart(stmt, offset, offsetIndex, toIndex),
+        getEnd(stmt, offset, offsetIndex, toIndex),
+      ),
       declared,
       dependencies: deps,
     };
@@ -397,10 +565,22 @@ function collectTopLevelDeclarationInfo(
   return null;
 }
 
-function buildDeclarationMap(ast: any, code: string, offset: number) {
+function buildDeclarationMap(
+  ast: any,
+  code: string,
+  offset: number,
+  offsetIndex: number,
+  toIndex?: (byteOffset: number) => number,
+) {
   const map = new Map<string, DeclarationInfo>();
   for (const stmt of ast.body ?? []) {
-    const info = collectTopLevelDeclarationInfo(stmt, code, offset);
+    const info = collectTopLevelDeclarationInfo(
+      stmt,
+      code,
+      offset,
+      offsetIndex,
+      toIndex,
+    );
     if (!info) continue;
     for (const name of info.declared) {
       map.set(name, info);
@@ -432,15 +612,15 @@ function findInlineFunctions(ast: any) {
     if (!node) continue;
 
     if (
-      (node.type === "ArrowFunctionExpression" || node.type === "FunctionExpression") &&
+      (node.type === "ArrowFunctionExpression" ||
+        node.type === "FunctionExpression") &&
       node.body &&
       node.body.type === "BlockStatement" &&
       node.body.stmts &&
       node.body.stmts.length > 0
     ) {
       const first = node.body.stmts[0];
-      const hasDirective =
-        first &&
+      const hasDirective = first &&
         first.type === "ExpressionStatement" &&
         first.expression?.type === "StringLiteral" &&
         first.expression.value === "use client";
@@ -450,7 +630,10 @@ function findInlineFunctions(ast: any) {
     }
 
     for (const key of Object.keys(node)) {
-      if (key === "start" || key === "end" || key === "type" || key === "loc" || key === "span" || key === "ctxt") continue;
+      if (
+        key === "start" || key === "end" || key === "type" || key === "loc" ||
+        key === "span" || key === "ctxt"
+      ) continue;
       const value: any = (node as any)[key];
       if (!value) continue;
       if (Array.isArray(value)) {
@@ -458,13 +641,17 @@ function findInlineFunctions(ast: any) {
           if (!child) continue;
           if (typeof child.type === "string") {
             stack.push(child);
-          } else if (child.expression && typeof child.expression.type === "string") {
+          } else if (
+            child.expression && typeof child.expression.type === "string"
+          ) {
             stack.push(child.expression);
           }
         }
       } else if (value && typeof value.type === "string") {
         stack.push(value);
-      } else if (value && value.expression && typeof value.expression.type === "string") {
+      } else if (
+        value && value.expression && typeof value.expression.type === "string"
+      ) {
         stack.push(value.expression);
       }
     }
@@ -478,7 +665,10 @@ function buildTransformFilter(
   userFilter: TopLevelFilterExpression | TopLevelFilterExpression[] | undefined,
 ) {
   if (userFilter === undefined) return defaults;
-  return [...defaults, ...(Array.isArray(userFilter) ? userFilter : [userFilter])];
+  return [
+    ...defaults,
+    ...(Array.isArray(userFilter) ? userFilter : [userFilter]),
+  ];
 }
 
 export type InlineClientPluginOptions = {
@@ -515,12 +705,18 @@ export default function inlineClientHandlers(
         if (id.startsWith("\0")) return;
         if (!maybeContainsUseClient(code)) return;
 
-        const debugLog =
-          typeof options.debug === "function"
-            ? options.debug
-            : options.debug
-              ? (msg: string) => this.warn?.(`[use-client] ${msg}`)
-              : null;
+        const fail = (message: string) => {
+          if (typeof this.error === "function") {
+            this.error(message);
+          }
+          throw new Error(message);
+        };
+
+        const debugLog = typeof options.debug === "function"
+          ? options.debug
+          : options.debug
+          ? (msg: string) => this.warn?.(`[use-client] ${msg}`)
+          : null;
 
         const absoluteId = path.isAbsolute(id) ? id : path.resolve(id);
         this.addWatchFile?.(absoluteId);
@@ -529,9 +725,15 @@ export default function inlineClientHandlers(
         try {
           ast = parseModule(code);
         } catch (error) {
-          debugLog?.(`parse failed for ${absoluteId}: ${(error as Error).message}`);
+          debugLog?.(
+            `parse failed for ${absoluteId}: ${(error as Error).message}`,
+          );
           return;
         }
+
+        const offset = Math.max(0, (ast?.span?.start ?? 1) - 1);
+        const byteOffsetToIndex = createByteOffsetLookup(code);
+        const offsetIndex = byteOffsetToIndex(offset);
 
         const inlineFunctions = findInlineFunctions(ast);
         if (inlineFunctions.length === 0) {
@@ -542,12 +744,46 @@ export default function inlineClientHandlers(
           `processing ${absoluteId} (len=${code.length}) with ${inlineFunctions.length} inline handlers`,
         );
 
-        const offset = Math.max(0, (ast?.span?.start ?? 1) - 1);
+        const sideEffectImports = (ast.body ?? []).filter(
+          (stmt: any) =>
+            stmt.type === "ImportDeclaration" &&
+            (stmt.specifiers?.length ?? 0) === 0 &&
+            stmt.typeOnly !== true,
+        );
+        if (sideEffectImports.length > 0) {
+          const first = sideEffectImports[0];
+          const snippet = code
+            .slice(
+              getStart(first, offset, offsetIndex, byteOffsetToIndex),
+              getEnd(first, offset, offsetIndex, byteOffsetToIndex),
+            )
+            .trim();
+          fail(
+            `[use-client] side-effect imports are not allowed in files with inline handlers (${absoluteId}).` +
+              (snippet ? ` Offending import: ${snippet}` : ""),
+          );
+        }
 
-        const importMap = buildImportMap(ast, code, offset);
-        const declarationMap = buildDeclarationMap(ast, code, offset);
+        const importMap = buildImportMap(
+          ast,
+          code,
+          offset,
+          offsetIndex,
+          byteOffsetToIndex,
+        );
+        const declarationMap = buildDeclarationMap(
+          ast,
+          code,
+          offset,
+          offsetIndex,
+          byteOffsetToIndex,
+        );
 
         const replacements: Replacement[] = [];
+        const fileHash = createHash("sha1").update(code).digest("hex").slice(
+          0,
+          12,
+        );
 
         for (const { node } of inlineFunctions) {
           const cleanedFn = stripUseClientDirective(node);
@@ -572,13 +808,25 @@ export default function inlineClientHandlers(
           });
 
           debugLog?.(
-            `handler span [${getStart(node, offset)}, ${getEnd(node, offset)}], body span [${
-              getStart(node.body, offset)
-            }, ${getEnd(node.body, offset)}], exported code: ${
+            `handler span [${
+              getStart(node, offset, offsetIndex, byteOffsetToIndex)
+            }, ${
+              getEnd(node, offset, offsetIndex, byteOffsetToIndex)
+            }], body span [${
+              getStart(node.body, offset, offsetIndex, byteOffsetToIndex)
+            }, ${
+              getEnd(node.body, offset, offsetIndex, byteOffsetToIndex)
+            }], exported code: ${
               exportedHandlerCode.slice(0, 60).replace(/\s+/g, " ")
             }...`,
           );
-          const rawSpan = getSpanWithParens(node, code, offset);
+          const rawSpan = getSpanWithParens(
+            node,
+            code,
+            offset,
+            offsetIndex,
+            byteOffsetToIndex,
+          );
           const span = trimForReplacement(rawSpan, code);
 
           if (
@@ -601,6 +849,17 @@ export default function inlineClientHandlers(
 
           const pending = [...freeRefs].filter((name) => !GLOBALS.has(name));
           const seen = new Set(pending);
+
+          const unresolved = pending.filter(
+            (name) => !importMap.has(name) && !declarationMap.has(name),
+          );
+          if (unresolved.length > 0) {
+            fail(
+              `[use-client] inline handler in ${absoluteId} references values that are not available in the client bundle: ${
+                unresolved.join(", ")
+              }`,
+            );
+          }
 
           while (pending.length > 0) {
             const name = pending.pop();
@@ -625,25 +884,31 @@ export default function inlineClientHandlers(
           }
 
           const sortedImports = Array.from(requiredImports.values()).sort(
-            (a, b) => getStart(a.node, offset) - getStart(b.node, offset),
+            (a, b) =>
+              getStart(a.node, offset, offsetIndex, byteOffsetToIndex) -
+              getStart(b.node, offset, offsetIndex, byteOffsetToIndex),
           );
-          const importCode =
-            sortedImports.length > 0
-              ? `${sortedImports.map((info) => info.code.trim()).join("\n")}\n\n`
-              : "";
+          const importCode = sortedImports.length > 0
+            ? `${sortedImports.map((info) => info.code.trim()).join("\n")}\n\n`
+            : "";
 
-          const sortedDeclarations = Array.from(requiredDeclarations.values()).sort(
-            (a, b) => getStart(a.node, offset) - getStart(b.node, offset),
-          );
-          const declarationCode =
-            sortedDeclarations.length > 0
-              ? `${sortedDeclarations.map((info) => info.code.trim()).join("\n\n")}\n\n`
-              : "";
+          const sortedDeclarations = Array.from(requiredDeclarations.values())
+            .sort(
+              (a, b) =>
+                getStart(a.node, offset, offsetIndex, byteOffsetToIndex) -
+                getStart(b.node, offset, offsetIndex, byteOffsetToIndex),
+            );
+          const declarationCode = sortedDeclarations.length > 0
+            ? `${
+              sortedDeclarations.map((info) => info.code.trim()).join("\n\n")
+            }\n\n`
+            : "";
 
           const hash = createHash("sha1")
-            .update(absoluteId)
-            .update(String(getStart(node, offset)))
-            .update(exportedHandlerCode)
+            .update(fileHash)
+            .update(
+              String(getStart(node, offset, offsetIndex, byteOffsetToIndex)),
+            )
             .digest("hex")
             .slice(0, 12);
 
@@ -653,21 +918,27 @@ export default function inlineClientHandlers(
             .replace(/[^a-zA-Z0-9_-]+/g, "_");
 
           const fileName = `${baseName}.${hash}.client.tsx`;
-          const inlineModulePath = path.join(path.dirname(absoluteId), fileName);
+          const inlineModulePath = path.join(
+            path.dirname(absoluteId),
+            fileName,
+          );
           const moduleId = `${INLINE_ID_PREFIX}${inlineModulePath}`;
 
-          const moduleCode = `"use client";\n\n${importCode}${declarationCode}${exportedHandlerCode}\n`;
+          const moduleCode =
+            `"use client";\n\n${importCode}${declarationCode}${exportedHandlerCode}\n`;
 
           setInlineClientModule(moduleId, moduleCode);
 
-          const emittedChunk: Parameters<TransformPluginContext["emitFile"]>[0] & {
-            moduleSideEffects: false;
-          } = {
-            type: "chunk",
-            id: moduleId,
-            fileName: `assets/${fileName.replace(/\.tsx?$/, ".js")}`,
-            moduleSideEffects: false,
-          };
+          const emittedChunk:
+            & Parameters<TransformPluginContext["emitFile"]>[0]
+            & {
+              moduleSideEffects: false;
+            } = {
+              type: "chunk",
+              id: moduleId,
+              fileName: `assets/${fileName.replace(/\.tsx?$/, ".js")}`,
+              moduleSideEffects: false,
+            };
 
           const refId = this.emitFile(emittedChunk);
           debugLog?.(
@@ -677,7 +948,8 @@ export default function inlineClientHandlers(
           replacements.push({
             start: span.start,
             end: span.end,
-            replacement: `new URL(import.meta.ROLLUP_FILE_URL_${refId}).pathname`,
+            replacement:
+              `new URL(import.meta.ROLLUP_FILE_URL_${refId}).pathname`,
           });
         }
 
@@ -689,7 +961,8 @@ export default function inlineClientHandlers(
 
         let transformed = code;
         for (const { start, end, replacement } of replacements) {
-          transformed = transformed.slice(0, start) + replacement + transformed.slice(end);
+          transformed = transformed.slice(0, start) + replacement +
+            transformed.slice(end);
         }
 
         return {

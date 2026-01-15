@@ -242,30 +242,29 @@ const requireUseClientDirectiveRule: Rule.RuleModule = {
           return;
         }
 
-        const block =
-          node.body && node.body.type === "BlockStatement" ? node.body : null;
+        const block = node.body && node.body.type === "BlockStatement"
+          ? node.body
+          : null;
 
-        const fix =
-          block !== null
-            ? (fixer: Rule.RuleFixer) => {
-                const openingBrace = sourceCode.getFirstToken(block);
-                if (!openingBrace) {
-                  return null;
-                }
+        const fix = block !== null
+          ? (fixer: Rule.RuleFixer) => {
+            const openingBrace = sourceCode.getFirstToken(block);
+            if (!openingBrace) {
+              return null;
+            }
 
-                const firstStatement = block.body[0] ?? null;
-                const fallbackIndent = (block.loc?.start.column ?? 0) + 2;
-                const indentSize =
-                  firstStatement?.loc?.start.column ?? fallbackIndent;
-                const indent = " ".repeat(indentSize);
-                const needsTrailingNewline = block.body.length === 0;
-                const text =
-                  `\n${indent}"use client";` +
-                  (needsTrailingNewline ? "\n" : "");
+            const firstStatement = block.body[0] ?? null;
+            const fallbackIndent = (block.loc?.start.column ?? 0) + 2;
+            const indentSize = firstStatement?.loc?.start.column ??
+              fallbackIndent;
+            const indent = " ".repeat(indentSize);
+            const needsTrailingNewline = block.body.length === 0;
+            const text = `\n${indent}"use client";` +
+              (needsTrailingNewline ? "\n" : "");
 
-                return fixer.insertTextAfter(openingBrace, text);
-              }
-            : null;
+            return fixer.insertTextAfter(openingBrace, text);
+          }
+          : null;
 
         context.report({
           node,

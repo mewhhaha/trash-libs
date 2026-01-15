@@ -1,24 +1,24 @@
 {
-    "name": "@mewhhaha/rolldown-plugin-tailwindcss",
-    "version": "0.0.1",
-    "license": "MIT",
-    "exports": {
-        ".": "./src/index.ts"
-    },
-    "imports": {
-        "@tailwindcss/node": "npm:@tailwindcss/node@^4.1.16",
-        "@tailwindcss/oxide": "npm:@tailwindcss/oxide@^4.1.16",
-        "@rolldown/pluginutils": "npm:@rolldown/pluginutils@^1.0.0-beta.45",
-        "rolldown": "npm:rolldown@^1.0.0-beta.45"
-    },
-    "tasks": {
-        "lint": "deno lint"
-    },
-    "compilerOptions": {
-        "types": ["npm:@types/node@^24.9.2"],
-        "allowImportingTsExtensions": true
-    },
-    "publish": {
-        "exclude": ["./dist", "./node_modules", "./tsconfig.json"]
-    }
+  "name": "@mewhhaha/rolldown-plugin-tailwindcss",
+  "version": "0.0.1",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "imports": {
+    "@tailwindcss/node": "npm:@tailwindcss/node@^4.1.18",
+    "@tailwindcss/oxide": "npm:@tailwindcss/oxide@^4.1.18",
+    "@rolldown/pluginutils": "npm:@rolldown/pluginutils@^1.0.0-beta.60",
+    "rolldown": "npm:rolldown@^1.0.0-beta.60"
+  },
+  "tasks": {
+    "lint": "deno lint"
+  },
+  "compilerOptions": {
+    "types": ["npm:@types/node@^24.9.2"],
+    "allowImportingTsExtensions": true
+  },
+  "publish": {
+    "exclude": ["./dist", "./node_modules", "./tsconfig.json"]
+  }
 }

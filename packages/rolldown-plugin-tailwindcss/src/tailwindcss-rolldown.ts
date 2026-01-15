@@ -31,13 +31,12 @@ export default function tailwindcss(
     exclude(id(/^\0/)),
   ];
   const userFilter = options.filter;
-  const transformFilter: TopLevelFilterExpression[] =
-    userFilter === undefined
-      ? defaultFilter
-      : [
-          ...defaultFilter,
-          ...(Array.isArray(userFilter) ? userFilter : [userFilter]),
-        ];
+  const transformFilter: TopLevelFilterExpression[] = userFilter === undefined
+    ? defaultFilter
+    : [
+      ...defaultFilter,
+      ...(Array.isArray(userFilter) ? userFilter : [userFilter]),
+    ];
 
   return {
     name: "tailwindcss:rolldown",

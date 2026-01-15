@@ -1,6 +1,10 @@
 # @mewhhaha/rolldown-plugin-use-client
 
-Rolldown plugin that lifts inline `"use client"` handlers into standalone client bundles. It emits one client chunk per handler, rewrites the server module to reference the generated file URL, and prunes any imports that are now client-only. Use it when you need to keep server modules lean while still shipping small, on-demand client scripts.
+Rolldown plugin that lifts inline `"use client"` handlers into standalone client
+bundles. It emits one client chunk per handler, rewrites the server module to
+reference the generated file URL, and prunes any imports that are now
+client-only. Use it when you need to keep server modules lean while still
+shipping small, on-demand client scripts.
 
 ## Installation
 
@@ -8,11 +12,14 @@ Rolldown plugin that lifts inline `"use client"` handlers into standalone client
 pnpm add -D @mewhhaha/rolldown-plugin-use-client rolldown @rolldown/pluginutils typescript
 ```
 
-The package ships TypeScript sources compiled to ESM. All dependencies listed above are peer dependencies and must exist in the consuming project.
+The package ships TypeScript sources compiled to ESM. All dependencies listed
+above are peer dependencies and must exist in the consuming project.
 
 ## Quick start
 
-Add the plugin to your `rolldown` config. The default filter covers common JS/TS entrypoints while skipping `node_modules`, so most projects can start with the zero-config setup below.
+Add the plugin to your `rolldown` config. The default filter covers common JS/TS
+entrypoints while skipping `node_modules`, so most projects can start with the
+zero-config setup below.
 
 ```ts
 // rolldown.config.ts
@@ -47,11 +54,15 @@ const LoginForm = () => {
 The plugin will:
 
 1. Hoist the handler into its own module that starts with `"use client";`.
-2. Copy any imports and top-level declarations the handler uses into that module.
+2. Copy any imports and top-level declarations the handler uses into that
+   module.
 3. Emit the module as a chunk with `moduleSideEffects === false`.
-4. Replace the inline function with `new URL(import.meta.ROLLUP_FILE_URL_<ref>).pathname`, giving you the final asset path at runtime.
+4. Replace the inline function with
+   `new URL(import.meta.ROLLUP_FILE_URL_<ref>).pathname`, giving you the final
+   asset path at runtime.
 
-You can stash that path, send it down to the client, or map it to a `<script type="module">` tag—whatever your application framework expects.
+You can stash that path, send it down to the client, or map it to a
+`<script type="module">` tag—whatever your application framework expects.
 
 ## Options
 
@@ -62,32 +73,57 @@ type UseClientPluginOptions = {
    * appended to the default include/exclude set.
    */
   filter?: TopLevelFilterExpression | TopLevelFilterExpression[];
+  /**
+   * Enable debug logging or supply a custom logger.
+   */
+  debug?: boolean | ((message: string) => void);
 };
 ```
 
-- `filter` &mdash; Additional filter expressions that refine which source files are scanned. The defaults include `**/*.js`, `**/*.jsx`, `**/*.ts`, and `**/*.tsx`, while excluding anything under `node_modules/`. Supply one or more expressions from `@rolldown/pluginutils` to widen or narrow the search.
+- `filter` &mdash; Additional filter expressions that refine which source files
+  are scanned. The defaults include `**/*.js`, `**/*.jsx`, `**/*.ts`, and
+  `**/*.tsx`, while excluding anything under `node_modules/`. Supply one or more
+  expressions from `@rolldown/pluginutils` to widen or narrow the search.
+- `debug` &mdash; Enable debug logging or provide a custom logger callback.
 
 ## ESLint support
 
-This package also exposes linting helpers under `@mewhhaha/rolldown-plugin-use-client/eslint/use-client`. Register the plugin and select the rules you want:
+This package also exposes linting helpers under
+`@mewhhaha/rolldown-plugin-use-client/eslint-plugin`. Register the plugin and
+select the rules you want:
 
 ```js
 // eslint.config.js
-import useclient from "@mewhhaha/rolldown-plugin-use-client/eslint/use-client";
+import useclient from "@mewhhaha/rolldown-plugin-use-client/eslint-plugin";
 
 export default [
-  useclient.configs.recommended
+  useclient.configs.recommended,
 ];
 ```
 
 Available rules:
 
-- `no-invalid-inline-client-closure` &mdash; Ensures inline handlers do not capture variables that disappear from the generated client bundle (e.g., component props or local state).
-- `require-use-client-directive` &mdash; Requires handlers passed to the `on` JSX attribute to start with a `"use client"` directive so they qualify for extraction.
+- `no-invalid-inline-client-closure` &mdash; Ensures inline handlers do not
+  capture variables that disappear from the generated client bundle (e.g.,
+  component props or local state).
+- `require-use-client-directive` &mdash; Requires handlers passed to the `on`
+  JSX attribute to start with a `"use client"` directive so they qualify for
+  extraction.
 
 ## Tips and limitations
 
-- Only block-bodied arrow or function expressions with a literal `"use client"` as their first statement qualify for extraction.
-- The plugin can follow imports and top-level declarations, but it cannot re-create values from intermediate scopes. Use the ESLint rule (or manually double-check) to avoid capturing component locals.
-- The replacement uses `new URL(import.meta.ROLLUP_FILE_URL_ref).pathname`. If you need the full `href` (or another format), wrap the helper yourself—`new URL(import.meta.ROLLUP_FILE_URL_ref, import.meta.url).href` mirrors Rollup's recommended pattern.
-- Client modules are stored in an in-memory registry during the build. Restart the build or trigger a fresh incremental run if you edit inline handlers and the output looks stale.
+- Only block-bodied arrow or function expressions with a literal `"use client"`
+  as their first statement qualify for extraction.
+- Inline handlers may only reference globals, imports, or top-level
+  declarations; anything else is rejected at build time.
+- Side-effect-only imports (e.g. `import "./reset.css"`) are not allowed in
+  files that contain inline handlers.
+- The replacement uses `new URL(import.meta.ROLLUP_FILE_URL_ref).pathname`. If
+  you need the full `href` (or another format), wrap the helper
+  yourself—`new URL(import.meta.ROLLUP_FILE_URL_ref, import.meta.url).href`
+  mirrors Rollup's recommended pattern.
+- Client chunk hashes derive from the source file contents and handler position,
+  so any edit to the file invalidates the emitted asset.
+- Client modules are stored in an in-memory registry during the build. Restart
+  the build or trigger a fresh incremental run if you edit inline handlers and
+  the output looks stale.
