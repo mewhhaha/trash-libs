@@ -6,9 +6,8 @@ import path from "node:path";
 import process from "node:process";
 import type { Plugin, TransformPluginContext } from "rolldown";
 
-const hasTailwindDirective = (code: string) =>
-  code.includes('@import "tailwindcss"') ||
-  code.includes("@import 'tailwindcss'");
+const TAILWIND_IMPORT_RE = /@import\s+(?:url\(\s*)?["']tailwindcss["']\s*\)?/;
+const hasTailwindDirective = (code: string) => TAILWIND_IMPORT_RE.test(code);
 
 export type TailwindPluginOptions = {
   root?: string;
@@ -61,14 +60,22 @@ export default function tailwindcss(
         let map: string | undefined;
 
         if (hasTailwindDirective(code)) {
+          const dependencyPaths = new Set<string>();
+          const baseDir = path.dirname(absPath);
           const compiler = await compile(code, {
             from: absPath,
-            base: path.dirname(absPath),
+            base: baseDir,
             shouldRewriteUrls: true,
-            onDependency: () => {
-              /* no-op */
+            onDependency: (dependencyPath: string) => {
+              const resolvedPath = path.isAbsolute(dependencyPath)
+                ? dependencyPath
+                : path.resolve(baseDir, dependencyPath);
+              dependencyPaths.add(resolvedPath);
             },
           });
+          for (const dependencyPath of dependencyPaths) {
+            this.addWatchFile?.(dependencyPath);
+          }
 
           const sources: Array<{
             base: string;

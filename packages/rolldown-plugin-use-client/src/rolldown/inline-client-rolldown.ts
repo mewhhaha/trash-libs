@@ -5,11 +5,9 @@ import path from "node:path";
 import type { Plugin, TransformPluginContext } from "rolldown";
 import { parseSync, printSync } from "@swc/core";
 import {
-  clearInlineClientModules,
-  getInlineClientModule,
+  createInlineClientRegistry,
   INLINE_ID_PREFIX,
   parseInlineModulePath,
-  setInlineClientModule,
 } from "./inline-client-registry.ts";
 
 type SwcSpan = { start?: number; end?: number; ctxt?: number };
@@ -200,6 +198,63 @@ function createByteOffsetLookup(code: string) {
   };
 }
 
+function findFirstTokenIndex(code: string) {
+  let i = 0;
+  if (code.charCodeAt(0) === 0xfeff) {
+    i = 1;
+  }
+  const shebangIndex = i;
+
+  while (i < code.length) {
+    const char = code[i];
+    if (/\s/u.test(char)) {
+      i += 1;
+      continue;
+    }
+
+    if (char === "#" && code[i + 1] === "!" && i === shebangIndex) {
+      i += 2;
+      while (i < code.length && code[i] !== "\n" && code[i] !== "\r") {
+        i += 1;
+      }
+      continue;
+    }
+
+    if (char === "/" && code[i + 1] === "/") {
+      i += 2;
+      while (i < code.length && code[i] !== "\n" && code[i] !== "\r") {
+        i += 1;
+      }
+      continue;
+    }
+
+    if (char === "/" && code[i + 1] === "*") {
+      i += 2;
+      while (i < code.length) {
+        if (code[i] === "*" && code[i + 1] === "/") {
+          i += 2;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+
+    break;
+  }
+
+  return i;
+}
+
+function getSwcSpanBaseOffset(ast: SwcProgram, code: string) {
+  const moduleStart = ast.span?.start ?? 1;
+  const firstTokenIndex = findFirstTokenIndex(code);
+  const firstTokenByteOffset = new TextEncoder().encode(
+    code.slice(0, firstTokenIndex),
+  ).length;
+  return Math.max(0, moduleStart - firstTokenByteOffset - 1);
+}
+
 function maybeContainsUseClient(code: string) {
   return code.includes("use client");
 }
@@ -276,6 +331,9 @@ function collectDeclaredFromPattern(pattern: unknown, target: Set<string>) {
   const patternType = getNodeType(pattern);
   if (!patternType) return;
   switch (patternType) {
+    case "Parameter":
+      collectDeclaredFromPattern(pattern.pat, target);
+      return;
     case "Identifier":
       if (typeof pattern.value === "string") {
         target.add(pattern.value);
@@ -530,6 +588,181 @@ function collectReferences(
   }
 }
 
+function collectScopeDeclarations(
+  scopeNode: SwcNode,
+  out: Set<string>,
+  targetFunctionNode?: SwcNode,
+) {
+  const scopeType = getNodeType(scopeNode);
+  if (!scopeType) return;
+
+  if (
+    scopeType === "FunctionDeclaration" ||
+    scopeType === "FunctionExpression" ||
+    scopeType === "ArrowFunctionExpression"
+  ) {
+    const identifier = isSwcNode(scopeNode.identifier)
+      ? scopeNode.identifier
+      : null;
+    const identifierName = getIdentifierValue(identifier);
+    if (identifierName) {
+      out.add(identifierName);
+    }
+    for (const param of getNodeArray(scopeNode.params)) {
+      collectDeclaredFromPattern(param, out);
+    }
+    return;
+  }
+
+  if (scopeType === "CatchClause") {
+    collectDeclaredFromPattern(scopeNode.param, out);
+    return;
+  }
+
+  const stmts = scopeType === "Program"
+    ? getNodeArray(scopeNode.body)
+    : scopeType === "BlockStatement"
+    ? getNodeArray(scopeNode.stmts)
+    : [];
+
+  for (const stmt of stmts) {
+    let target = stmt;
+    if (getNodeType(target) === "ExportDeclaration") {
+      const decl = isSwcNode(target.declaration) ? target.declaration : null;
+      if (decl) {
+        target = decl;
+      }
+    }
+
+    if (targetFunctionNode && target === targetFunctionNode) {
+      continue;
+    }
+
+    const targetType = getNodeType(target);
+    if (!targetType) continue;
+
+    if (targetType === "VariableDeclaration") {
+      for (const decl of getNodeArray(target.declarations)) {
+        collectDeclaredFromPattern(decl.id, out);
+      }
+      continue;
+    }
+
+    if (
+      targetType === "FunctionDeclaration" ||
+      targetType === "ClassDeclaration" ||
+      targetType === "TsEnumDeclaration" ||
+      targetType === "TsConstEnumDeclaration"
+    ) {
+      const identifier = isSwcNode(target.identifier) ? target.identifier : null;
+      const id = isSwcNode(target.id) ? target.id : null;
+      const name = getIdentifierValue(identifier) ?? getIdentifierValue(id);
+      if (name) {
+        out.add(name);
+      }
+      continue;
+    }
+
+    if (targetType === "ImportDeclaration") {
+      for (const spec of getNodeArray(target.specifiers)) {
+        const local = isSwcNode(spec.local) ? spec.local : null;
+        const localName = getIdentifierValue(local);
+        if (localName) {
+          out.add(localName);
+        }
+      }
+    }
+  }
+}
+
+function isScopeNodeType(nodeType: string | undefined) {
+  return nodeType === "Program" ||
+    nodeType === "BlockStatement" ||
+    nodeType === "FunctionDeclaration" ||
+    nodeType === "FunctionExpression" ||
+    nodeType === "ArrowFunctionExpression" ||
+    nodeType === "CatchClause";
+}
+
+function isCallableIdentifierUse(node: SwcNode, parent: SwcNode | null) {
+  if (!parent) return false;
+  const parentType = getNodeType(parent);
+  if (!parentType) return false;
+  if (
+    (parentType === "CallExpression" ||
+      parentType === "OptionalCallExpression" ||
+      parentType === "NewExpression") &&
+    parent.callee === node
+  ) {
+    return true;
+  }
+  if (parentType === "TaggedTemplateExpression" && parent.tag === node) {
+    return true;
+  }
+  return false;
+}
+
+function hasUnsafeCallableUsages(
+  ast: SwcProgram,
+  name: string,
+  targetFunctionNode: SwcNode,
+) {
+  const stack: Array<{ node: SwcNode; parent: SwcNode | null; shadow: number }> = [
+    { node: ast, parent: null, shadow: 0 },
+  ];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+    const { node, parent, shadow } = current;
+    if (node === targetFunctionNode) {
+      continue;
+    }
+
+    const nodeType = getNodeType(node);
+    if (
+      nodeType === "Identifier" &&
+      typeof node.value === "string" &&
+      node.value === name &&
+      shadow === 0 &&
+      isIdentifierReference(node, parent) &&
+      isCallableIdentifierUse(node, parent)
+    ) {
+      return true;
+    }
+
+    const scopeShadow = isScopeNodeType(nodeType)
+      ? (() => {
+        const declarations = new Set<string>();
+        collectScopeDeclarations(node, declarations, targetFunctionNode);
+        return declarations.has(name) ? 1 : 0;
+      })()
+      : 0;
+    const nextShadow = shadow + scopeShadow;
+
+    const nodeRecord = node as Record<string, unknown>;
+    for (const key of Object.keys(nodeRecord)) {
+      if (
+        key === "start" || key === "end" || key === "type" || key === "loc" ||
+        key === "span" || key === "ctxt"
+      ) continue;
+      const value = nodeRecord[key];
+      if (!value) continue;
+      if (Array.isArray(value)) {
+        for (const child of value) {
+          if (isSwcNode(child)) {
+            stack.push({ node: child, parent: node, shadow: nextShadow });
+          }
+        }
+      } else if (isSwcNode(value)) {
+        stack.push({ node: value, parent: node, shadow: nextShadow });
+      }
+    }
+  }
+
+  return false;
+}
+
 function buildImportMap(
   ast: SwcProgram,
   code: string,
@@ -657,29 +890,38 @@ function stripUseClientDirective(fnNode: SwcNode) {
   return fnNode;
 }
 
+function toExportableFunctionExpression(fnNode: SwcNode): SwcNode {
+  if (getNodeType(fnNode) === "FunctionDeclaration") {
+    return { ...fnNode, type: "FunctionExpression" };
+  }
+  return fnNode;
+}
+
 function findInlineFunctions(ast: SwcProgram) {
-  const matches: Array<{ node: SwcNode }> = [];
-  const stack: SwcNode[] = [];
+  const matches: Array<{ node: SwcNode; parent: SwcNode | null }> = [];
+  const stack: Array<{ node: SwcNode; parent: SwcNode | null }> = [];
   const seen = new WeakSet<object>();
 
-  const pushNode = (value: unknown) => {
+  const pushNode = (value: unknown, parent: SwcNode | null) => {
     if (!isSwcNode(value)) return;
     const obj = value as object;
     if (seen.has(obj)) return;
     seen.add(obj);
-    stack.push(value);
+    stack.push({ node: value, parent });
   };
 
-  pushNode(ast);
+  pushNode(ast, null);
 
   while (stack.length) {
-    const node = stack.pop();
-    if (!node) continue;
+    const next = stack.pop();
+    if (!next) continue;
+    const { node, parent } = next;
 
     const nodeType = getNodeType(node);
     if (
       nodeType === "ArrowFunctionExpression" ||
-      nodeType === "FunctionExpression"
+      nodeType === "FunctionExpression" ||
+      nodeType === "FunctionDeclaration"
     ) {
       const body = isSwcNode(node.body) ? node.body : null;
       if (body && getNodeType(body) === "BlockStatement") {
@@ -694,7 +936,7 @@ function findInlineFunctions(ast: SwcProgram) {
           getNodeType(expression) === "StringLiteral" &&
           expression.value === "use client";
         if (hasDirective) {
-          matches.push({ node });
+          matches.push({ node, parent });
         }
       }
     }
@@ -709,10 +951,10 @@ function findInlineFunctions(ast: SwcProgram) {
       if (!value) continue;
       if (Array.isArray(value)) {
         for (const child of value) {
-          pushNode(child);
+          pushNode(child, node);
         }
       } else {
-        pushNode(value);
+        pushNode(value, node);
       }
     }
   }
@@ -745,11 +987,16 @@ export type InlineClientPluginOptions = {
    * How to handle references that cannot be bundled into the client chunk.
    */
   unresolved?: "error" | "warn" | "ignore";
+  /**
+   * Enable strict behavior for transform-time safety checks.
+   */
+  strict?: boolean;
 };
 
 export default function inlineClientHandlers(
   options: InlineClientPluginOptions = {},
 ): Plugin {
+  const inlineRegistry = createInlineClientRegistry();
   const defaultFilter: TopLevelFilterExpression[] = [
     include(id(/\.[cm]?[jt]sx?$/i, { cleanUrl: true })),
     exclude(id(/(?:^|[\\/])node_modules(?:[\\/]|$)/)),
@@ -760,7 +1007,7 @@ export default function inlineClientHandlers(
     name: "inline-client-handlers-fast",
 
     buildStart() {
-      clearInlineClientModules();
+      inlineRegistry.clear();
     },
 
     transform: {
@@ -781,7 +1028,9 @@ export default function inlineClientHandlers(
           : options.debug
           ? (msg: string) => this.warn?.(`[use-client] ${msg}`)
           : null;
-        const unresolvedPolicy = options.unresolved ?? "ignore";
+        const strictMode = options.strict === true;
+        const unresolvedPolicy = options.unresolved ??
+          (strictMode ? "error" : "warn");
 
         const absoluteId = path.isAbsolute(id) ? id : path.resolve(id);
         this.addWatchFile?.(absoluteId);
@@ -790,13 +1039,18 @@ export default function inlineClientHandlers(
         try {
           ast = parseModule(code);
         } catch (error) {
-          debugLog?.(
-            `parse failed for ${absoluteId}: ${(error as Error).message}`,
-          );
+          const parseMessage =
+            `[use-client] failed to parse ${absoluteId}: ${(error as Error).message}`;
+          if (strictMode) {
+            fail(parseMessage);
+          } else {
+            this.warn?.(parseMessage);
+          }
+          debugLog?.(parseMessage);
           return;
         }
 
-        const offset = Math.max(0, (ast.span?.start ?? 1) - 1);
+        const offset = getSwcSpanBaseOffset(ast, code);
         const byteOffsetToIndex = createByteOffsetLookup(code);
 
         const inlineFunctions = findInlineFunctions(ast);
@@ -840,9 +1094,32 @@ export default function inlineClientHandlers(
           0,
           12,
         );
+        const normalizedId = path.resolve(absoluteId).replaceAll("\\", "/");
 
-        for (const { node } of inlineFunctions) {
+        for (const { node, parent } of inlineFunctions) {
+          const nodeType = getNodeType(node);
+          const parentType = parent ? getNodeType(parent) : undefined;
+          const identifier = isSwcNode(node.identifier)
+            ? node.identifier
+            : null;
+          const functionName = getIdentifierValue(identifier);
+          const isNamedDefaultFunction = parentType === "ExportDefaultDeclaration" &&
+            nodeType === "FunctionExpression" &&
+            !!functionName;
+          const needsCallableGuard = nodeType === "FunctionDeclaration" ||
+            isNamedDefaultFunction;
+          if (
+            needsCallableGuard &&
+            functionName &&
+            hasUnsafeCallableUsages(ast, functionName, node)
+          ) {
+            fail(
+              `[use-client] inline function declaration "${functionName}" in ${absoluteId} is used as a callable value. ` +
+                "Only pass extracted handlers as values (for example to JSX attributes).",
+            );
+          }
           const cleanedFn = stripUseClientDirective(node);
+          const exportableFn = toExportableFunctionExpression(cleanedFn);
 
           const exportModule: SwcNode = {
             type: "Module",
@@ -851,7 +1128,7 @@ export default function inlineClientHandlers(
               {
                 type: "ExportDefaultExpression",
                 span: dummySpan(),
-                expression: cleanedFn,
+                expression: exportableFn,
               },
             ],
             interpreter: null,
@@ -876,8 +1153,14 @@ export default function inlineClientHandlers(
               exportedHandlerCode.slice(0, 60).replace(/\s+/g, " ")
             }...`,
           );
+          const spanTarget = (nodeType === "FunctionDeclaration" &&
+              (parentType === "ExportDeclaration" ||
+                parentType === "ExportDefaultDeclaration")) ||
+              isNamedDefaultFunction
+            ? (parent ?? node)
+            : node;
           const rawSpan = getSpanWithParens(
-            node,
+            spanTarget,
             code,
             offset,
             byteOffsetToIndex,
@@ -966,6 +1249,7 @@ export default function inlineClientHandlers(
           const hash = createHash("sha1")
             .update(fileHash)
             .update(String(getStart(node, offset, byteOffsetToIndex)))
+            .update(normalizedId)
             .digest("hex")
             .slice(0, 12);
 
@@ -984,7 +1268,7 @@ export default function inlineClientHandlers(
           const moduleCode =
             `"use client";\n\n${importCode}${declarationCode}${exportedHandlerCode}\n`;
 
-          setInlineClientModule(moduleId, moduleCode);
+          inlineRegistry.set(moduleId, moduleCode);
 
           const emittedChunk:
             & Parameters<TransformPluginContext["emitFile"]>[0]
@@ -1002,12 +1286,41 @@ export default function inlineClientHandlers(
             `emitted client chunk ${emittedChunk.fileName} for handler at ${absoluteId}`,
           );
 
-          replacements.push({
-            start: span.start,
-            end: span.end,
-            replacement:
-              `new URL(import.meta.ROLLUP_FILE_URL_${refId}).pathname`,
-          });
+          const replacementValue =
+            `new URL(import.meta.ROLLUP_FILE_URL_${refId}).pathname`;
+
+          if (nodeType === "FunctionDeclaration" || isNamedDefaultFunction) {
+            if (!functionName) {
+              debugLog?.(
+                "skipping function declaration inline handler without identifier",
+              );
+              continue;
+            }
+            if (parentType === "ExportDefaultDeclaration") {
+              replacements.push({
+                start: span.start,
+                end: span.end,
+                replacement:
+                  `const ${functionName} = ${replacementValue}; export default ${functionName};`,
+              });
+              continue;
+            }
+            const exportPrefix = parentType === "ExportDeclaration"
+              ? "export "
+              : "";
+            replacements.push({
+              start: span.start,
+              end: span.end,
+              replacement:
+                `${exportPrefix}const ${functionName} = ${replacementValue};`,
+            });
+          } else {
+            replacements.push({
+              start: span.start,
+              end: span.end,
+              replacement: replacementValue,
+            });
+          }
         }
 
         if (replacements.length === 0) {
@@ -1061,7 +1374,7 @@ export default function inlineClientHandlers(
 
     load(id) {
       if (!id.startsWith(INLINE_ID_PREFIX)) return null;
-      const code = getInlineClientModule(id);
+      const code = inlineRegistry.get(id);
       if (code === undefined) return null;
       return {
         code,

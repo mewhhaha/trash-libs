@@ -81,6 +81,10 @@ type UseClientPluginOptions = {
    * How to handle references that cannot be bundled into the client chunk.
    */
   unresolved?: "error" | "warn" | "ignore";
+  /**
+   * Enable strict behavior for transform-time safety checks.
+   */
+  strict?: boolean;
 };
 ```
 
@@ -90,7 +94,9 @@ type UseClientPluginOptions = {
   expressions from `@rolldown/pluginutils` to widen or narrow the search.
 - `debug` &mdash; Enable debug logging or provide a custom logger callback.
 - `unresolved` &mdash; How to handle references that cannot be bundled into the
-  client chunk (`ignore` by default).
+  client chunk (`warn` by default, `error` in strict mode unless overridden).
+- `strict` &mdash; Turns parse failures and unresolved references into hard
+  errors by default.
 
 ## ESLint support
 
@@ -118,18 +124,21 @@ Available rules:
 
 ## Tips and limitations
 
-- Only block-bodied arrow or function expressions with a literal `"use client"`
-  as their first statement qualify for extraction.
+- Only block-bodied arrow functions, function expressions, and function
+  declarations with a literal `"use client"` as their first statement qualify
+  for extraction.
 - Inline handlers may only reference globals, imports, or top-level
-  declarations; anything else is ignored by default (see `unresolved`).
+  declarations; anything else warns by default (see `unresolved`).
+- Extracted function declarations are rewritten to URL string bindings. Calling
+  those bindings as functions is invalid and now rejected at build time.
 - Side-effect-only imports (e.g. `import "./reset.css"`) are not allowed in
   files that contain inline handlers.
 - The replacement uses `new URL(import.meta.ROLLUP_FILE_URL_ref).pathname`. If
   you need the full `href` (or another format), wrap the helper
   yourself—`new URL(import.meta.ROLLUP_FILE_URL_ref, import.meta.url).href`
   mirrors Rollup's recommended pattern.
-- Client chunk hashes derive from the source file contents and handler position,
-  so any edit to the file invalidates the emitted asset.
+- Client chunk hashes derive from source file path, file contents, and handler
+  position, so edits or moving the file invalidate the emitted asset.
 - Client modules are stored in an in-memory registry during the build. Restart
   the build or trigger a fresh incremental run if you edit inline handlers and
   the output looks stale.
