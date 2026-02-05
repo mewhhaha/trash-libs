@@ -226,3 +226,111 @@ Deno.test("rolldown build emits transformed tailwind css asset", async () => {
     await bundle.close();
   }
 });
+
+Deno.test("rolldown js entry importing css emits transformed tailwind asset", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tailwind-rolldown-import-" });
+  const entryPath = path.join(root, "entry.ts");
+  const cssPath = path.join(root, "styles.css");
+  const fakeTailwindDir = path.join(root, "node_modules", "tailwindcss");
+
+  await Deno.mkdir(fakeTailwindDir, { recursive: true });
+  await Deno.writeTextFile(
+    path.join(fakeTailwindDir, "package.json"),
+    JSON.stringify(
+      {
+        name: "tailwindcss",
+        version: "0.0.0-test",
+        style: "index.css",
+      },
+      null,
+      2,
+    ),
+  );
+  await Deno.writeTextFile(
+    path.join(fakeTailwindDir, "index.css"),
+    "@theme { --color-red-500: oklch(63.7% 0.237 25.331); } @tailwind utilities;",
+  );
+  await Deno.writeTextFile(
+    path.join(root, "index.html"),
+    '<div class="text-red-500"></div>',
+  );
+  await Deno.writeTextFile(cssPath, '@import "tailwindcss";');
+  await Deno.writeTextFile(entryPath, 'import "./styles.css";\nexport const ok = true;\n');
+
+  const bundle = await rolldown({
+    input: entryPath,
+    cwd: root,
+    plugins: [tailwindcss({ root, optimize: false, minify: false })],
+  });
+
+  try {
+    const { output } = await bundle.generate({ format: "esm" });
+    const css = getCssAssetSource(output as unknown[]);
+    assertExists(css, "rolldown should emit a css asset for imported styles");
+    assertStringIncludes(css, ".text-red-500");
+    assertStringIncludes(css, "color: var(--color-red-500);");
+    assert(
+      !css.includes('@import "tailwindcss"'),
+      "tailwind import should be compiled out for imported css assets",
+    );
+  } finally {
+    await bundle.close();
+  }
+});
+
+Deno.test("rolldown new URL css asset emits transformed tailwind asset", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tailwind-rolldown-new-url-" });
+  const entryPath = path.join(root, "entry.ts");
+  const cssPath = path.join(root, "styles.css");
+  const fakeTailwindDir = path.join(root, "node_modules", "tailwindcss");
+
+  await Deno.mkdir(fakeTailwindDir, { recursive: true });
+  await Deno.writeTextFile(
+    path.join(fakeTailwindDir, "package.json"),
+    JSON.stringify(
+      {
+        name: "tailwindcss",
+        version: "0.0.0-test",
+        style: "index.css",
+      },
+      null,
+      2,
+    ),
+  );
+  await Deno.writeTextFile(
+    path.join(fakeTailwindDir, "index.css"),
+    "@theme { --color-red-500: oklch(63.7% 0.237 25.331); } @tailwind utilities;",
+  );
+  await Deno.writeTextFile(
+    path.join(root, "index.html"),
+    '<div class="text-red-500"></div>',
+  );
+  await Deno.writeTextFile(cssPath, '@import "tailwindcss";');
+  await Deno.writeTextFile(
+    entryPath,
+    'export const styleUrl = new URL("./styles.css", import.meta.url).toString();\n',
+  );
+
+  const bundle = await rolldown({
+    input: entryPath,
+    cwd: root,
+    plugins: [tailwindcss({ root, optimize: false, minify: false })],
+    experimental: {
+      resolveNewUrlToAsset: true,
+    },
+  });
+
+  try {
+    const { output } = await bundle.generate({ format: "esm" });
+    const css = getCssAssetSource(output as unknown[]);
+    assertExists(css, "rolldown should emit a css asset for new URL imports");
+    assertStringIncludes(css, ".text-red-500");
+    assertStringIncludes(css, "color: var(--color-red-500);");
+    assert(
+      !css.includes('@import "tailwindcss"'),
+      "tailwind import should be compiled out for new URL css assets",
+    );
+  } finally {
+    await bundle.close();
+  }
+});

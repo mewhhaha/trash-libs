@@ -4,7 +4,7 @@ import { exclude, id, include } from "@rolldown/pluginutils";
 import type { TopLevelFilterExpression } from "@rolldown/pluginutils";
 import path from "node:path";
 import process from "node:process";
-import type { Plugin, TransformPluginContext } from "rolldown";
+import type { Plugin, PluginContext, TransformPluginContext } from "rolldown";
 
 const TAILWIND_IMPORT_RE = /@import\s+(?:url\(\s*)?["']tailwindcss["']\s*\)?/;
 const hasTailwindDirective = (code: string) => TAILWIND_IMPORT_RE.test(code);
@@ -25,6 +25,7 @@ export default function tailwindcss(
   const rootDir = options.root ?? process.cwd();
   const shouldOptimize = options.optimize ?? true;
   const shouldMinify = options.minify ?? true;
+  const loadTransformedCssIds = new Set<string>();
   const defaultFilter: TopLevelFilterExpression[] = [
     include(id(/\.css$/i, { cleanUrl: true })),
     exclude(id(/(?:^|[\\/])node_modules(?:[\\/]|$)/)),
@@ -38,8 +39,105 @@ export default function tailwindcss(
       ...(Array.isArray(userFilter) ? userFilter : [userFilter]),
     ];
 
+  const getAbsoluteCssPath = (id: string): string | null => {
+    const [rawPath] = id.split("?", 2);
+    if (!rawPath || !rawPath.endsWith(".css")) {
+      return null;
+    }
+    return path.isAbsolute(rawPath) ? rawPath : path.resolve(rootDir, rawPath);
+  };
+
+  const transformCss = async (
+    ctx: Pick<PluginContext, "addWatchFile">,
+    code: string,
+    absPath: string,
+  ): Promise<{ code: string; map?: string }> => {
+    let css = code;
+    let map: string | undefined;
+
+    if (hasTailwindDirective(code)) {
+      const dependencyPaths = new Set<string>();
+      const baseDir = path.dirname(absPath);
+      const compiler = await compile(code, {
+        from: absPath,
+        base: baseDir,
+        shouldRewriteUrls: true,
+        onDependency: (dependencyPath: string) => {
+          const resolvedPath = path.isAbsolute(dependencyPath)
+            ? dependencyPath
+            : path.resolve(baseDir, dependencyPath);
+          dependencyPaths.add(resolvedPath);
+        },
+      });
+      for (const dependencyPath of dependencyPaths) {
+        ctx.addWatchFile?.(dependencyPath);
+      }
+
+      const sources: Array<{
+        base: string;
+        pattern: string;
+        negated: boolean;
+      }> = [];
+      if (compiler.root === null) {
+        sources.push({ base: rootDir, pattern: "**/*", negated: false });
+      } else if (compiler.root !== "none") {
+        sources.push({ ...compiler.root, negated: false });
+      }
+      sources.push(...compiler.sources);
+
+      const scanner = new Scanner({ sources });
+      const candidates = Array.from(scanner.scan());
+
+      css = compiler.build(candidates);
+      const rawMap = compiler.buildSourceMap();
+      map = rawMap ? toSourceMap(rawMap).raw : undefined;
+    }
+
+    if (shouldOptimize) {
+      const optimizeOptions: Parameters<typeof optimize>[1] = {
+        minify: shouldMinify,
+        file: absPath,
+      };
+      if (map !== undefined) {
+        optimizeOptions.map = map;
+      }
+      const optimized = optimize(css, optimizeOptions);
+      css = optimized.code;
+      map = optimized.map;
+    }
+
+    return { code: css, map };
+  };
+
   return {
     name: "tailwindcss:rolldown",
+    load: {
+      filter: transformFilter,
+      async handler(this: PluginContext, id) {
+        if (id.startsWith("\0")) {
+          return null;
+        }
+        const absPath = getAbsoluteCssPath(id);
+        if (!absPath) {
+          return null;
+        }
+        let code: string;
+        try {
+          code = await this.fs.readFile(absPath, { encoding: "utf8" });
+        } catch {
+          return null;
+        }
+        const result = await transformCss(this, code, absPath);
+        loadTransformedCssIds.add(id);
+        return {
+          code: result.code,
+          map: result.map ?? null,
+        };
+      },
+    },
+    buildEnd() {
+      loadTransformedCssIds.clear();
+    },
     transform: {
       filter: transformFilter,
       async handler(this: TransformPluginContext, code, id) {
@@ -47,72 +145,21 @@ export default function tailwindcss(
           return null;
         }
 
-        const [rawPath] = id.split("?", 2);
-        if (!rawPath || !rawPath.endsWith(".css")) {
+        if (loadTransformedCssIds.has(id)) {
+          loadTransformedCssIds.delete(id);
           return null;
         }
 
-        const absPath = path.isAbsolute(rawPath)
-          ? rawPath
-          : path.resolve(rootDir, rawPath);
-
-        let css = code;
-        let map: string | undefined;
-
-        if (hasTailwindDirective(code)) {
-          const dependencyPaths = new Set<string>();
-          const baseDir = path.dirname(absPath);
-          const compiler = await compile(code, {
-            from: absPath,
-            base: baseDir,
-            shouldRewriteUrls: true,
-            onDependency: (dependencyPath: string) => {
-              const resolvedPath = path.isAbsolute(dependencyPath)
-                ? dependencyPath
-                : path.resolve(baseDir, dependencyPath);
-              dependencyPaths.add(resolvedPath);
-            },
-          });
-          for (const dependencyPath of dependencyPaths) {
-            this.addWatchFile?.(dependencyPath);
-          }
-
-          const sources: Array<{
-            base: string;
-            pattern: string;
-            negated: boolean;
-          }> = [];
-          if (compiler.root === null) {
-            sources.push({ base: rootDir, pattern: "**/*", negated: false });
-          } else if (compiler.root !== "none") {
-            sources.push({ ...compiler.root, negated: false });
-          }
-          sources.push(...compiler.sources);
-
-          const scanner = new Scanner({ sources });
-          const candidates = Array.from(scanner.scan());
-
-          css = compiler.build(candidates);
-          const rawMap = compiler.buildSourceMap();
-          map = rawMap ? toSourceMap(rawMap).raw : undefined;
+        const absPath = getAbsoluteCssPath(id);
+        if (!absPath) {
+          return null;
         }
 
-        if (shouldOptimize) {
-          const optimizeOptions: Parameters<typeof optimize>[1] = {
-            minify: shouldMinify,
-            file: absPath,
-          };
-          if (map !== undefined) {
-            optimizeOptions.map = map;
-          }
-          const optimized = optimize(css, optimizeOptions);
-          css = optimized.code;
-          map = optimized.map;
-        }
+        const result = await transformCss(this, code, absPath);
 
         return {
-          code: css,
-          map: map ?? null,
+          code: result.code,
+          map: result.map ?? null,
         };
       },
     },
