@@ -1,4 +1,4 @@
-import { assert, assertExists } from "std/assert";
+import { assert, assertExists, assertStringIncludes } from "std/assert";
 import path from "node:path";
 import tailwindcss from "./tailwindcss-rolldown.ts";
 
@@ -118,5 +118,46 @@ Deno.test("tailwind import detection supports url() form", async () => {
   assert(
     watched.includes(path.resolve(depPath)),
     "url() tailwind import should still track dependencies",
+  );
+});
+
+Deno.test("tailwind import compiles into generated utility css", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tailwind-transform-" });
+  const entryPath = path.join(root, "entry.css");
+  const fakeTailwindDir = path.join(root, "node_modules", "tailwindcss");
+
+  await Deno.mkdir(fakeTailwindDir, { recursive: true });
+  await Deno.writeTextFile(
+    path.join(fakeTailwindDir, "package.json"),
+    JSON.stringify(
+      {
+        name: "tailwindcss",
+        version: "0.0.0-test",
+        style: "index.css",
+      },
+      null,
+      2,
+    ),
+  );
+  await Deno.writeTextFile(
+    path.join(fakeTailwindDir, "index.css"),
+    "@theme { --color-red-500: oklch(63.7% 0.237 25.331); } @tailwind utilities;",
+  );
+  await Deno.writeTextFile(
+    path.join(root, "index.html"),
+    '<div class="text-red-500"></div>',
+  );
+
+  const plugin = tailwindcss({ root, optimize: false, minify: false });
+  const handler = getTransformHandler(plugin);
+  const result = await handler.call({}, '@import "tailwindcss";', entryPath);
+
+  const resultCode = getResultCode(result);
+  assertExists(resultCode, "transform should return css output");
+  assertStringIncludes(resultCode, ".text-red-500");
+  assertStringIncludes(resultCode, "color: var(--color-red-500);");
+  assert(
+    !resultCode.includes('@import "tailwindcss"'),
+    "tailwind import should be compiled out",
   );
 });
