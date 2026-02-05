@@ -1,5 +1,6 @@
 import { assert, assertExists, assertStringIncludes } from "std/assert";
 import path from "node:path";
+import { rolldown } from "rolldown";
 import tailwindcss from "./tailwindcss-rolldown.ts";
 
 type TransformContextLike = {
@@ -38,6 +39,21 @@ function getResultCode(result: unknown): string | undefined {
   if (!record) return undefined;
   const code = record.code;
   return typeof code === "string" ? code : undefined;
+}
+
+function getCssAssetSource(output: unknown[]): string | undefined {
+  for (const emitted of output) {
+    const record = asRecord(emitted);
+    if (!record) continue;
+    const fileName = record.fileName;
+    if (record.type !== "asset" || typeof fileName !== "string") continue;
+    if (!fileName.endsWith(".css")) continue;
+
+    const source = record.source;
+    if (typeof source === "string") return source;
+    if (source instanceof Uint8Array) return new TextDecoder().decode(source);
+  }
+  return undefined;
 }
 
 Deno.test("tailwind transform tracks dependencies as watch files", async () => {
@@ -160,4 +176,53 @@ Deno.test("tailwind import compiles into generated utility css", async () => {
     !resultCode.includes('@import "tailwindcss"'),
     "tailwind import should be compiled out",
   );
+});
+
+Deno.test("rolldown build emits transformed tailwind css asset", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tailwind-rolldown-" });
+  const entryPath = path.join(root, "entry.css");
+  const fakeTailwindDir = path.join(root, "node_modules", "tailwindcss");
+
+  await Deno.mkdir(fakeTailwindDir, { recursive: true });
+  await Deno.writeTextFile(
+    path.join(fakeTailwindDir, "package.json"),
+    JSON.stringify(
+      {
+        name: "tailwindcss",
+        version: "0.0.0-test",
+        style: "index.css",
+      },
+      null,
+      2,
+    ),
+  );
+  await Deno.writeTextFile(
+    path.join(fakeTailwindDir, "index.css"),
+    "@theme { --color-red-500: oklch(63.7% 0.237 25.331); } @tailwind utilities;",
+  );
+  await Deno.writeTextFile(
+    path.join(root, "index.html"),
+    '<div class="text-red-500"></div>',
+  );
+  await Deno.writeTextFile(entryPath, '@import "tailwindcss";');
+
+  const bundle = await rolldown({
+    input: entryPath,
+    cwd: root,
+    plugins: [tailwindcss({ root, optimize: false, minify: false })],
+  });
+
+  try {
+    const { output } = await bundle.generate({ format: "esm" });
+    const css = getCssAssetSource(output as unknown[]);
+    assertExists(css, "rolldown should emit a css asset");
+    assertStringIncludes(css, ".text-red-500");
+    assertStringIncludes(css, "color: var(--color-red-500);");
+    assert(
+      !css.includes('@import "tailwindcss"'),
+      "tailwind import should be compiled out in emitted asset",
+    );
+  } finally {
+    await bundle.close();
+  }
 });
