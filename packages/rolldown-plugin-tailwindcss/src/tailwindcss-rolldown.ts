@@ -51,11 +51,16 @@ export default function tailwindcss(
     ctx: Pick<PluginContext, "addWatchFile">,
     code: string,
     absPath: string,
-  ): Promise<{ code: string; map?: string }> => {
+  ): Promise<{ code: string; map?: string } | null> => {
+    const shouldCompileTailwind = hasTailwindDirective(code);
+    if (!shouldCompileTailwind && !shouldOptimize) {
+      return null;
+    }
+
     let css = code;
     let map: string | undefined;
 
-    if (hasTailwindDirective(code)) {
+    if (shouldCompileTailwind) {
       const dependencyPaths = new Set<string>();
       const baseDir = path.dirname(absPath);
       const compiler = await compile(code, {
@@ -128,6 +133,9 @@ export default function tailwindcss(
           return null;
         }
         const result = await transformCss(this, code, absPath);
+        if (!result) {
+          return null;
+        }
         loadTransformedCssIds.add(id);
         return {
           code: result.code,
@@ -156,6 +164,9 @@ export default function tailwindcss(
         }
 
         const result = await transformCss(this, code, absPath);
+        if (!result) {
+          return null;
+        }
 
         return {
           code: result.code,
