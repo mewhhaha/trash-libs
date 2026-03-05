@@ -23,6 +23,12 @@ export function createInlineClientRegistry(): InlineClientRegistry {
 
 export function parseInlineModulePath(inlineId: string): string {
   const withoutPrefix = inlineId.slice(INLINE_ID_PREFIX.length);
-  const [pathname] = withoutPrefix.split("?", 1);
-  return pathname;
+  const queryIndex = withoutPrefix.indexOf("?");
+  const hashIndex = withoutPrefix.indexOf("#");
+  const cutIndex = queryIndex === -1
+    ? hashIndex
+    : hashIndex === -1
+    ? queryIndex
+    : Math.min(queryIndex, hashIndex);
+  return cutIndex === -1 ? withoutPrefix : withoutPrefix.slice(0, cutIndex);
 }

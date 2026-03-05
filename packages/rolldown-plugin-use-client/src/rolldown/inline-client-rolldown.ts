@@ -123,7 +123,6 @@ const GLOBALS = new Set([
   "Date",
   "Error",
   "Promise",
-  "arguments",
   "alert",
   "confirm",
   "prompt",
@@ -259,7 +258,59 @@ function maybeContainsUseClient(code: string) {
   return code.includes("use client");
 }
 
-function parseModule(code: string): SwcProgram {
+function splitPluginId(sourceId: string) {
+  const queryIndex = sourceId.indexOf("?");
+  const hashIndex = sourceId.indexOf("#");
+  const cutIndex = queryIndex === -1
+    ? hashIndex
+    : hashIndex === -1
+    ? queryIndex
+    : Math.min(queryIndex, hashIndex);
+  if (cutIndex === -1) {
+    return { rawId: sourceId, suffix: "" };
+  }
+  const rawId = sourceId.slice(0, cutIndex);
+  return {
+    rawId: rawId.length > 0 ? rawId : sourceId,
+    suffix: sourceId.slice(cutIndex),
+  };
+}
+
+function parseModule(code: string, fileId: string): SwcProgram {
+  const extension = path.extname(fileId).toLowerCase();
+
+  if (extension === ".ts" || extension === ".mts" || extension === ".cts") {
+    return parseSync(code, {
+      syntax: "typescript",
+      tsx: false,
+      target: "es2024",
+    }) as unknown as SwcProgram;
+  }
+
+  if (extension === ".tsx") {
+    return parseSync(code, {
+      syntax: "typescript",
+      tsx: true,
+      target: "es2024",
+    }) as unknown as SwcProgram;
+  }
+
+  if (extension === ".js" || extension === ".mjs" || extension === ".cjs") {
+    return parseSync(code, {
+      syntax: "ecmascript",
+      jsx: false,
+      target: "es2024",
+    }) as unknown as SwcProgram;
+  }
+
+  if (extension === ".jsx") {
+    return parseSync(code, {
+      syntax: "ecmascript",
+      jsx: true,
+      target: "es2024",
+    }) as unknown as SwcProgram;
+  }
+
   return parseSync(code, {
     syntax: "typescript",
     tsx: true,
@@ -482,6 +533,9 @@ function collectReferences(
     case "FunctionExpression":
     case "ArrowFunctionExpression": {
       const scope = new Set<string>();
+      if (nodeType !== "ArrowFunctionExpression") {
+        scope.add("arguments");
+      }
       const identifier = isSwcNode(node.identifier) ? node.identifier : null;
       const identifierName = getIdentifierValue(identifier);
       if (identifierName) {
@@ -962,6 +1016,27 @@ function findInlineFunctions(ast: SwcProgram) {
   return matches;
 }
 
+function getInlineBindingName(node: SwcNode, parent: SwcNode | null): string | null {
+  if (!parent) return null;
+  const parentType = getNodeType(parent);
+
+  if (parentType === "VariableDeclarator" && parent.init === node) {
+    const declaratorId = isSwcNode(parent.id) ? parent.id : null;
+    if (declaratorId && getNodeType(declaratorId) === "Identifier") {
+      return getIdentifierValue(declaratorId);
+    }
+  }
+
+  if (parentType === "AssignmentExpression" && parent.right === node) {
+    const assignmentLeft = isSwcNode(parent.left) ? parent.left : null;
+    if (assignmentLeft && getNodeType(assignmentLeft) === "Identifier") {
+      return getIdentifierValue(assignmentLeft);
+    }
+  }
+
+  return null;
+}
+
 function buildTransformFilter(
   defaults: TopLevelFilterExpression[],
   userFilter: TopLevelFilterExpression | TopLevelFilterExpression[] | undefined,
@@ -1010,6 +1085,10 @@ export default function inlineClientHandlers(
       inlineRegistry.clear();
     },
 
+    buildEnd() {
+      inlineRegistry.clear();
+    },
+
     transform: {
       filter: transformFilter,
       handler(this: TransformPluginContext, code, id) {
@@ -1031,13 +1110,14 @@ export default function inlineClientHandlers(
         const strictMode = options.strict === true;
         const unresolvedPolicy = options.unresolved ??
           (strictMode ? "error" : "warn");
+        const { rawId } = splitPluginId(id);
 
-        const absoluteId = path.isAbsolute(id) ? id : path.resolve(id);
+        const absoluteId = path.isAbsolute(rawId) ? rawId : path.resolve(rawId);
         this.addWatchFile?.(absoluteId);
 
         let ast: SwcProgram;
         try {
-          ast = parseModule(code);
+          ast = parseModule(code, absoluteId);
         } catch (error) {
           const parseMessage =
             `[use-client] failed to parse ${absoluteId}: ${(error as Error).message}`;
@@ -1103,18 +1183,17 @@ export default function inlineClientHandlers(
             ? node.identifier
             : null;
           const functionName = getIdentifierValue(identifier);
+          const bindingName = getInlineBindingName(node, parent ?? null);
+          const callableName = functionName ?? bindingName;
           const isNamedDefaultFunction = parentType === "ExportDefaultDeclaration" &&
             nodeType === "FunctionExpression" &&
             !!functionName;
-          const needsCallableGuard = nodeType === "FunctionDeclaration" ||
-            isNamedDefaultFunction;
           if (
-            needsCallableGuard &&
-            functionName &&
-            hasUnsafeCallableUsages(ast, functionName, node)
+            callableName &&
+            hasUnsafeCallableUsages(ast, callableName, node)
           ) {
             fail(
-              `[use-client] inline function declaration "${functionName}" in ${absoluteId} is used as a callable value. ` +
+              `[use-client] inline handler "${callableName}" in ${absoluteId} is used as a callable value. ` +
                 "Only pass extracted handlers as values (for example to JSX attributes).",
             );
           }
@@ -1191,16 +1270,25 @@ export default function inlineClientHandlers(
           const unresolved = pending.filter(
             (name) => !importMap.has(name) && !declarationMap.has(name),
           );
-          if (unresolved.length > 0) {
-            const message =
-              `[use-client] inline handler in ${absoluteId} references values that are not available in the client bundle: ${
-                unresolved.join(", ")
-              }`;
+          const reportUnresolved = (message: string) => {
             if (unresolvedPolicy === "error") {
               fail(message);
             } else if (unresolvedPolicy === "warn") {
               this.warn?.(message);
             }
+          };
+          if (unresolved.includes("arguments")) {
+            reportUnresolved(
+              `[use-client] inline handler in ${absoluteId} references "arguments", which is unavailable after extraction for inline arrow handlers.`,
+            );
+          }
+          const unresolvedNames = unresolved.filter((name) => name !== "arguments");
+          if (unresolvedNames.length > 0) {
+            reportUnresolved(
+              `[use-client] inline handler in ${absoluteId} references values that are not available in the client bundle: ${
+                unresolvedNames.join(", ")
+              }`,
+            );
           }
 
           while (pending.length > 0) {
@@ -1287,7 +1375,7 @@ export default function inlineClientHandlers(
           );
 
           const replacementValue =
-            `new URL(import.meta.ROLLUP_FILE_URL_${refId}).pathname`;
+            `new URL(import.meta.ROLLUP_FILE_URL_${refId}, import.meta.url).pathname`;
 
           if (nodeType === "FunctionDeclaration" || isNamedDefaultFunction) {
             if (!functionName) {
@@ -1374,7 +1462,9 @@ export default function inlineClientHandlers(
 
     load(id) {
       if (!id.startsWith(INLINE_ID_PREFIX)) return null;
-      const code = inlineRegistry.get(id);
+      const inlineModulePath = parseInlineModulePath(id);
+      const inlineModuleId = `${INLINE_ID_PREFIX}${inlineModulePath}`;
+      const code = inlineRegistry.get(inlineModuleId);
       if (code === undefined) return null;
       return {
         code,

@@ -2,6 +2,7 @@ import { assert, assertExists, assertRejects } from "std/assert";
 import path from "node:path";
 import { rolldown } from "rolldown";
 import { parseSync } from "@swc/core";
+import { INLINE_ID_PREFIX, parseInlineModulePath } from "./inline-client-registry.ts";
 import useClient from "./inline-client-rolldown.ts";
 
 type EmitFileChunk = { fileName?: string; id?: string };
@@ -73,6 +74,26 @@ function isInlineClientChunk(
   }
   return typeof record.code === "string";
 }
+
+Deno.test("parseInlineModulePath strips query and hash suffixes", () => {
+  const inlinePath = "/tmp/inline-client.tsx";
+  const withQuery = `${INLINE_ID_PREFIX}${inlinePath}?v=1`;
+  const withHash = `${INLINE_ID_PREFIX}${inlinePath}#view`;
+  const withBoth = `${INLINE_ID_PREFIX}${inlinePath}?v=1#view`;
+
+  assert(
+    parseInlineModulePath(withQuery) === inlinePath,
+    "inline query suffix should be stripped",
+  );
+  assert(
+    parseInlineModulePath(withHash) === inlinePath,
+    "inline hash suffix should be stripped",
+  );
+  assert(
+    parseInlineModulePath(withBoth) === inlinePath,
+    "inline query/hash suffix should be stripped",
+  );
+});
 
 Deno.test("nested inline handler still emits client chunk", async () => {
   const root = await Deno.makeTempDir({ prefix: "use-client-test-" });
@@ -338,6 +359,99 @@ export function Component() {
   );
 });
 
+Deno.test("inline arrow handler warns when referencing arguments", async () => {
+  const plugin = useClient();
+  const handler = getTransformHandler(plugin);
+  const warnings: string[] = [];
+
+  const ctx: TransformContextLike = {
+    warn(message: string) {
+      warnings.push(message);
+    },
+    addWatchFile: () => {},
+    emitFile() {
+      return "ref_0";
+    },
+  };
+
+  const code = `
+export const handler = () => {
+  "use client";
+  return arguments.length;
+};
+`;
+
+  const result = await handler.call(ctx, code, "/tmp/inline-arguments-arrow.tsx");
+  const resultCode = getResultCode(result);
+  assertExists(resultCode, "transform should still return code");
+  assert(
+    warnings.some((message) => message.includes('references "arguments"')),
+    'default policy should warn when inline arrow handlers reference "arguments"',
+  );
+});
+
+Deno.test("inline arrow handler rejects arguments when unresolved is error", async () => {
+  const plugin = useClient({ unresolved: "error" });
+  const handler = getTransformHandler(plugin);
+
+  const ctx: TransformContextLike = {
+    warn: () => {},
+    addWatchFile: () => {},
+    emitFile() {
+      return "ref_0";
+    },
+    error(message: string) {
+      throw new Error(message);
+    },
+  };
+
+  const code = `
+export const handler = () => {
+  "use client";
+  return arguments.length;
+};
+`;
+
+  await assertRejects(
+    async () => {
+      await handler.call(ctx, code, "/tmp/inline-arguments-arrow-error.tsx");
+    },
+    Error,
+    'references "arguments"',
+  );
+});
+
+Deno.test("inline function expression can reference arguments", async () => {
+  const plugin = useClient();
+  const handler = getTransformHandler(plugin);
+  const warnings: string[] = [];
+
+  const ctx: TransformContextLike = {
+    warn(message: string) {
+      warnings.push(message);
+    },
+    addWatchFile: () => {},
+    emitFile() {
+      return "ref_0";
+    },
+  };
+
+  const code = `
+export const handler = function () {
+  "use client";
+  return arguments.length;
+};
+`;
+
+  const result = await handler.call(ctx, code, "/tmp/inline-arguments-fn.tsx");
+  const resultCode = getResultCode(result);
+  assertExists(resultCode, "transform should return code");
+  assert(
+    warnings.every((message) => !message.includes('references "arguments"')),
+    'function expression handlers should not warn for local "arguments"',
+  );
+});
+
 Deno.test("strict mode rejects unresolved references without override", async () => {
   const plugin = useClient({ strict: true });
   const handler = getTransformHandler(plugin);
@@ -470,6 +584,33 @@ Deno.test("non-strict parse failures warn and skip transform", async () => {
   );
 });
 
+Deno.test(".ts files parse without tsx mode and still transform handlers", async () => {
+  const plugin = useClient();
+  const handler = getTransformHandler(plugin);
+
+  const ctx: TransformContextLike = {
+    emitFile() {
+      return "ref_0";
+    },
+  };
+
+  const code = `
+const value = <number> 1;
+export const handler = () => {
+  "use client";
+  return value;
+};
+`;
+
+  const result = await handler.call(ctx, code, "/tmp/inline-ts-mode.ts");
+  const resultCode = getResultCode(result);
+  assertExists(resultCode, "transform should return code");
+  assert(
+    resultCode.includes("ROLLUP_FILE_URL_ref_0"),
+    "handler should be replaced in .ts files",
+  );
+});
+
 Deno.test("inline handler hash follows file contents", async () => {
   const plugin = useClient();
   const handler = getTransformHandler(plugin);
@@ -563,6 +704,53 @@ export const handler = () => {
   assert(nameA !== nameB, "filenames should not collide across directories");
 });
 
+Deno.test("query and hash in transform ids do not affect watch paths or hashes", async () => {
+  const plugin = useClient();
+  const handler = getTransformHandler(plugin);
+  const fileNames: Array<string | undefined> = [];
+  const watched: string[] = [];
+
+  const makeCtx = (): TransformContextLike => ({
+    addWatchFile(id: string) {
+      watched.push(path.resolve(id));
+    },
+    emitFile(chunk: EmitFileChunk) {
+      fileNames.push(chunk.fileName);
+      return `ref_${fileNames.length - 1}`;
+    },
+  });
+
+  const code = `
+export const handler = () => {
+  "use client";
+  return 1;
+};
+`;
+
+  await handler.call(makeCtx(), code, "/tmp/query-stable.tsx?version=1#top");
+  await handler.call(makeCtx(), code, "/tmp/query-stable.tsx?version=2#bottom");
+
+  const watchedPath = path.resolve("/tmp/query-stable.tsx");
+  assert(
+    watched.includes(watchedPath),
+    "watch file path should ignore query/hash suffixes",
+  );
+  assert(
+    watched.every((entry) => !entry.includes("?") && !entry.includes("#")),
+    "watch files should not keep query/hash text",
+  );
+
+  const hashA = fileNames[0]?.split(".")[1];
+  const hashB = fileNames[1]?.split(".")[1];
+  assert(hashA && hashB && hashA === hashB, "hash should ignore query/hash");
+  assert(
+    fileNames.every((name) =>
+      typeof name === "string" && !name.includes("?") && !name.includes("#")
+    ),
+    "emitted file names should not include query/hash",
+  );
+});
+
 Deno.test("inline module registry is isolated per plugin instance", async () => {
   const pluginA = useClient();
   const pluginB = useClient();
@@ -615,16 +803,26 @@ export const handler = () => {
 
   const loadA = await loadHandlerA(moduleIdA);
   const loadB = await loadHandlerB(moduleIdB);
+  const loadAWithSuffix = await loadHandlerA(`${moduleIdA}?v=1#debug`);
   const crossLoadA = await loadHandlerA(moduleIdB);
   const crossLoadB = await loadHandlerB(moduleIdA);
 
   const loadCodeA = getResultCode(loadA);
   const loadCodeB = getResultCode(loadB);
+  const loadCodeAWithSuffix = getResultCode(loadAWithSuffix);
   assertExists(loadCodeA, "plugin A should load its inline module");
   assertExists(loadCodeB, "plugin B should load its inline module");
+  assertExists(
+    loadCodeAWithSuffix,
+    "plugin A should load inline modules with query/hash suffixes",
+  );
   assert(
     loadCodeA.includes("plugin-a"),
     "plugin A should return its own registry content",
+  );
+  assert(
+    loadCodeAWithSuffix.includes("plugin-a"),
+    "plugin A query/hash lookup should return registry content",
   );
   assert(
     loadCodeB.includes("plugin-b"),
@@ -657,7 +855,7 @@ export const x = top;
   const resultCode = getResultCode(result);
   assertExists(resultCode, "transform result should include code");
   assert(
-    resultCode.includes("new URL(import.meta.ROLLUP_FILE_URL_ref_0).pathname"),
+    resultCode.includes("new URL(import.meta.ROLLUP_FILE_URL_ref_0, import.meta.url).pathname"),
     "handler should be replaced",
   );
   parseSync(resultCode, { syntax: "typescript", tsx: true, target: "es2024" });
@@ -682,7 +880,7 @@ Deno.test("BOM and comment trivia before handler keeps spans aligned", async () 
   const resultCode = getResultCode(result);
   assertExists(resultCode, "transform result should include code");
   assert(
-    resultCode.includes("new URL(import.meta.ROLLUP_FILE_URL_ref_0).pathname"),
+    resultCode.includes("new URL(import.meta.ROLLUP_FILE_URL_ref_0, import.meta.url).pathname"),
     "handler should be replaced",
   );
   parseSync(resultCode, { syntax: "typescript", tsx: true, target: "es2024" });
@@ -809,7 +1007,7 @@ export function Component() {
   assertExists(resultCode, "transform result should include code");
   assert(
     resultCode.includes(
-      "const top = new URL(import.meta.ROLLUP_FILE_URL_ref_0).pathname;",
+      "const top = new URL(import.meta.ROLLUP_FILE_URL_ref_0, import.meta.url).pathname;",
     ),
     "function declaration should become a url binding",
   );
@@ -842,7 +1040,7 @@ export const useTop = top;
   assertExists(resultCode, "transform result should include code");
   assert(
     resultCode.includes(
-      "export const top = new URL(import.meta.ROLLUP_FILE_URL_ref_0).pathname;",
+      "export const top = new URL(import.meta.ROLLUP_FILE_URL_ref_0, import.meta.url).pathname;",
     ),
     "exported function declaration should keep named export",
   );
@@ -873,7 +1071,7 @@ Deno.test("export default function declaration inline handler is replaced", asyn
   assertExists(resultCode, "transform result should include code");
   assert(
     resultCode.includes(
-      "const top = new URL(import.meta.ROLLUP_FILE_URL_ref_0).pathname;",
+      "const top = new URL(import.meta.ROLLUP_FILE_URL_ref_0, import.meta.url).pathname;",
     ),
     "default export should keep a local binding for named functions",
   );
@@ -905,7 +1103,7 @@ export const alias = top;
   const resultCode = getResultCode(result);
   assertExists(resultCode, "transform result should include code");
   assert(
-    resultCode.includes("const top = new URL(import.meta.ROLLUP_FILE_URL_ref_0).pathname;"),
+    resultCode.includes("const top = new URL(import.meta.ROLLUP_FILE_URL_ref_0, import.meta.url).pathname;"),
     "named default function should keep local binding after rewrite",
   );
   assert(
@@ -967,7 +1165,7 @@ Deno.test("callable usage of anonymous default function is not transformed", asy
   assertExists(resultCode, "transform result should include code");
   assert(
     resultCode.includes(
-      "export default new URL(import.meta.ROLLUP_FILE_URL_ref_0).pathname",
+      "export default new URL(import.meta.ROLLUP_FILE_URL_ref_0, import.meta.url).pathname",
     ),
     "anonymous default function should still rewrite directly to default value",
   );
@@ -999,6 +1197,71 @@ top();
   await assertRejects(
     async () => {
       await handler.call(ctx, code, "/tmp/top-call-unsafe.tsx");
+    },
+    Error,
+    "used as a callable value",
+  );
+});
+
+Deno.test("callable usage of extracted identifier-bound handler is rejected", async () => {
+  const plugin = useClient();
+  const handler = getTransformHandler(plugin);
+
+  const ctx: TransformContextLike = {
+    warn: () => {},
+    addWatchFile: () => {},
+    emitFile() {
+      return "ref_0";
+    },
+    error(message: string) {
+      throw new Error(message);
+    },
+  };
+
+  const code = `const top = () => {
+  "use client";
+  return 1;
+};
+
+top();
+`;
+
+  await assertRejects(
+    async () => {
+      await handler.call(ctx, code, "/tmp/top-const-call-unsafe.tsx");
+    },
+    Error,
+    "used as a callable value",
+  );
+});
+
+Deno.test("callable usage of assignment-bound handler is rejected", async () => {
+  const plugin = useClient();
+  const handler = getTransformHandler(plugin);
+
+  const ctx: TransformContextLike = {
+    warn: () => {},
+    addWatchFile: () => {},
+    emitFile() {
+      return "ref_0";
+    },
+    error(message: string) {
+      throw new Error(message);
+    },
+  };
+
+  const code = `let top;
+top = () => {
+  "use client";
+  return 1;
+};
+
+top();
+`;
+
+  await assertRejects(
+    async () => {
+      await handler.call(ctx, code, "/tmp/top-assignment-call-unsafe.tsx");
     },
     Error,
     "used as a callable value",
@@ -1096,9 +1359,42 @@ export const value = top;
   assertExists(resultCode, "transform result should include code");
   assert(
     resultCode.includes(
-      "const top = new URL(import.meta.ROLLUP_FILE_URL_ref_0).pathname;",
+      "const top = new URL(import.meta.ROLLUP_FILE_URL_ref_0, import.meta.url).pathname;",
     ),
     "top-level declaration should still be extracted",
+  );
+});
+
+Deno.test("shadowed callable usage does not block extracted identifier binding", async () => {
+  const plugin = useClient();
+  const handler = getTransformHandler(plugin);
+
+  const ctx: TransformContextLike = {
+    emitFile() {
+      return "ref_0";
+    },
+  };
+
+  const code = `const top = () => {
+  "use client";
+  return 1;
+};
+
+function invoke(top) {
+  return top();
+}
+
+export const value = top;
+`;
+
+  const result = await handler.call(ctx, code, "/tmp/top-const-call-shadowed.tsx");
+  const resultCode = getResultCode(result);
+  assertExists(resultCode, "transform result should include code");
+  assert(
+    resultCode.includes(
+      "const top = new URL(import.meta.ROLLUP_FILE_URL_ref_0, import.meta.url).pathname;",
+    ),
+    "top-level identifier binding should still be extracted",
   );
 });
 

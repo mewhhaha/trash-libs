@@ -58,8 +58,8 @@ The plugin will:
    module.
 3. Emit the module as a chunk with `moduleSideEffects === false`.
 4. Replace the inline function with
-   `new URL(import.meta.ROLLUP_FILE_URL_<ref>).pathname`, giving you the final
-   asset path at runtime.
+   `new URL(import.meta.ROLLUP_FILE_URL_<ref>, import.meta.url).pathname`,
+   giving you the final asset path at runtime.
 
 You can stash that path, send it down to the client, or map it to a
 `<script type="module">` tag—whatever your application framework expects.
@@ -129,14 +129,15 @@ Available rules:
   for extraction.
 - Inline handlers may only reference globals, imports, or top-level
   declarations; anything else warns by default (see `unresolved`).
-- Extracted function declarations are rewritten to URL string bindings. Calling
-  those bindings as functions is invalid and now rejected at build time.
+- Inline arrow handlers cannot use `arguments` after extraction. The plugin
+  warns by default (or errors when `unresolved: "error"`).
+- Extracted handlers are rewritten to URL string bindings. Calling those
+  bindings as functions is invalid and rejected at build time.
 - Side-effect-only imports (e.g. `import "./reset.css"`) are not allowed in
   files that contain inline handlers.
-- The replacement uses `new URL(import.meta.ROLLUP_FILE_URL_ref).pathname`. If
-  you need the full `href` (or another format), wrap the helper
-  yourself—`new URL(import.meta.ROLLUP_FILE_URL_ref, import.meta.url).href`
-  mirrors Rollup's recommended pattern.
+- The replacement uses
+  `new URL(import.meta.ROLLUP_FILE_URL_ref, import.meta.url).pathname`. If you
+  need the full `href` (or another format), wrap the helper yourself.
 - Client chunk hashes derive from source file path, file contents, and handler
   position, so edits or moving the file invalidate the emitted asset.
 - Client modules are stored in an in-memory registry during the build. Restart
