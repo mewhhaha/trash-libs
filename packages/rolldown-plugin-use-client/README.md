@@ -35,34 +35,56 @@ export default defineConfig({
 
 ### What the transform does
 
-Given a server component that embeds a client handler:
+Current `@mewhhaha/ruwuter` uses `client.scope()` plus `scope.mount(...)` /
+`scope.unmount(...)` for client behavior. Inline `"use client"` functions fit
+that shape directly:
 
 ```ts
-const LoginForm = () => {
-  const handleSubmit = (event) => {
-    "use client";
-    event.preventDefault();
-    queueMicrotask(() => {
-      window.alert("Submitted!");
-    });
-  };
+import { Client, client, on } from "@mewhhaha/ruwuter/components";
 
-  return <form on={handleSubmit}>...</form>;
-};
+export default function LoginForm() {
+  const scope = client.scope();
+  const form = scope.ref("form", null as HTMLFormElement | null);
+  const status = scope.ref("status", "idle");
+
+  scope.mount(function (_event: Event, signal: AbortSignal) {
+    "use client";
+    on(this.form).submit((event) => {
+      event.preventDefault();
+      this.status.set("submitted");
+      window.alert("Submitted!");
+    }, { signal });
+  });
+
+  return (
+    <html>
+      <body>
+        <form ref={form}>
+          <button type="submit">Sign in</button>
+        </form>
+        <p>{status}</p>
+        <Client />
+      </body>
+    </html>
+  );
+}
 ```
 
 The plugin will:
 
-1. Hoist the handler into its own module that starts with `"use client";`.
+1. Hoist the inline mount handler into its own module that starts with
+   `"use client";`.
 2. Copy any imports and top-level declarations the handler uses into that
    module.
 3. Emit the module as a chunk with `moduleSideEffects === false`.
 4. Replace the inline function with
    `new URL(import.meta.ROLLUP_FILE_URL_<ref>, import.meta.url).pathname`,
-   giving you the final asset path at runtime.
+   giving `scope.mount(...)` the final client module URL at runtime.
 
-You can stash that path, send it down to the client, or map it to a
-`<script type="module">` tag—whatever your application framework expects.
+That matches the latest `ruwuter` runtime contract: `client.scope()` is the
+primary interaction API, `scope.mount(...)` / `scope.unmount(...)` expect
+client-module URLs, and legacy `on={...}` event props are no longer the main
+integration path.
 
 ## Options
 
@@ -120,7 +142,8 @@ Available rules:
   component props or local state).
 - `require-use-client-directive` &mdash; Requires handlers passed to the `on`
   JSX attribute to start with a `"use client"` directive so they qualify for
-  extraction.
+  extraction. This mainly helps legacy JSX event-prop patterns; current
+  `ruwuter` code typically wires behavior through `client.scope()`.
 
 ## Tips and limitations
 
@@ -131,6 +154,10 @@ Available rules:
   declarations; anything else warns by default (see `unresolved`).
 - Inline arrow handlers cannot use `arguments` after extraction. The plugin
   warns by default (or errors when `unresolved: "error"`).
+- For current `@mewhhaha/ruwuter`, prefer `scope.mount(function (...) { "use client"; ... })`
+  or `scope.unmount(function (...) { "use client"; ... })`. Use a `function`
+  when you need the scope bind object as `this`; arrow functions do not get the
+  runtime `this` binding.
 - Extracted handlers are rewritten to URL string bindings. Calling those
   bindings as functions is invalid and rejected at build time.
 - Side-effect-only imports (e.g. `import "./reset.css"`) are not allowed in
