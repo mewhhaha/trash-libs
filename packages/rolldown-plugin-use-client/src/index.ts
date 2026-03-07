@@ -1,4 +1,5 @@
 /**
+ * @module
  * Rolldown plugin and ESLint companion exports for extracting inline
  * `"use client"` handlers into standalone client chunks.
  */

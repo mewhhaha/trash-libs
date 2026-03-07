@@ -1,4 +1,5 @@
 /**
+ * @module
  * ESLint rules for code that uses inline `"use client"` handlers with the
  * Rolldown plugin.
  */

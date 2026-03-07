@@ -1,4 +1,5 @@
 /**
+ * @module
  * Public entrypoint for the use-client Rolldown plugin.
  */
 

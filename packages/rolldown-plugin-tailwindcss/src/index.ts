@@ -1,4 +1,5 @@
 /**
+ * @module
  * Rolldown plugin exports for compiling and optimizing Tailwind CSS files
  * during a build.
  */

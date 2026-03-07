@@ -1,4 +1,5 @@
 /**
+ * @module
  * Rolldown plugin that compiles `@import "tailwindcss"` CSS entrypoints and
  * optionally runs Tailwind's optimizer over other CSS files.
  */
