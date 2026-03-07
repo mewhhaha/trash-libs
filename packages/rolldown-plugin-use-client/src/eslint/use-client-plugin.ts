@@ -1,3 +1,8 @@
+/**
+ * ESLint rules for code that uses inline `"use client"` handlers with the
+ * Rolldown plugin.
+ */
+
 import type { Rule, SourceCode } from "eslint";
 import type {
   ArrowFunctionExpression,
@@ -280,6 +285,7 @@ type UseClientPlugin = {
   configs?: Record<string, unknown>;
 };
 
+/** ESLint plugin containing the `use-client` lint rules and presets. */
 const plugin: UseClientPlugin = {
   rules: {
     "no-invalid-inline-client-closure": noInvalidInlineClientClosureRule,

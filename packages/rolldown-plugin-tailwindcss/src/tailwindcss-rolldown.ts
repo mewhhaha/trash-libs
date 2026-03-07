@@ -1,3 +1,8 @@
+/**
+ * Rolldown plugin that compiles `@import "tailwindcss"` CSS entrypoints and
+ * optionally runs Tailwind's optimizer over other CSS files.
+ */
+
 import { compile, optimize, toSourceMap } from "@tailwindcss/node";
 import { Scanner } from "@tailwindcss/oxide";
 import { exclude, id, include } from "@rolldown/pluginutils";
@@ -10,8 +15,11 @@ const TAILWIND_IMPORT_RE = /@import\s+(?:url\(\s*)?["']tailwindcss["']\s*\)?/;
 const hasTailwindDirective = (code: string) => TAILWIND_IMPORT_RE.test(code);
 
 export type TailwindPluginOptions = {
+  /** Project root used for scanning content files and resolving relative CSS. */
   root?: string;
+  /** Whether to minify the optimized CSS output. Defaults to `true`. */
   minify?: boolean;
+  /** Whether to run Tailwind's optimizer. Defaults to `true`. */
   optimize?: boolean;
   /**
    * Extra filter expression(s) appended to the default CSS filter.
@@ -19,6 +27,7 @@ export type TailwindPluginOptions = {
   filter?: TopLevelFilterExpression | TopLevelFilterExpression[];
 };
 
+/** Returns the Rolldown plugin that compiles and optimizes Tailwind CSS. */
 export default function tailwindcss(
   options: TailwindPluginOptions = {},
 ): Plugin {
